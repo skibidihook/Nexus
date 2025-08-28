@@ -1,3 +1,8 @@
+if game.PlaceId ~= 7305309231 then
+    warn('only for taxi-boss')
+    return
+end
+
 local G2L = {}
 
 G2L['1'] = Instance.new(
