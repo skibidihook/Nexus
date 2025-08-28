@@ -1,0 +1,2 @@
+# Nexus
+discord.gg/nexusx
