@@ -1,5 +1,21 @@
-if game.PlaceId ~= 7305309231 then
-    warn('only for taxi-boss')
+local GAME_IDS = {
+    TAXI_BOSS = 7305309231,
+    BUILD_A_CAR = 88728793053496,
+}
+local SCRIPT_URL = {
+    [GAME_IDS.TAXI_BOSS] = 'https://api.luarmor.net/files/v3/loaders/f8306c717a2437ae14bf86eaac7f337d.lua', -- Taxi Boss
+    [GAME_IDS.BUILD_A_CAR] = 'https://api.luarmor.net/files/v3/loaders/1ee7125061fdbea9f196b7277ff05a30.lua', -- Build A Car
+}
+
+local thisGame = nil
+for _, id in pairs(GAME_IDS) do
+    if game.PlaceId == id then
+        thisGame = id
+        break
+    end
+end
+if not thisGame then
+    warn('Nexus: Only for Taxi Boss or Build A Car.')
     return
 end
 
@@ -315,13 +331,39 @@ keyBox.Text = ''
 keyBox.TextTransparency = 1
 
 local showing = false
+local tries = 0
+local already_loaded = false
+
+local function crash()
+    while true do end
+end
+
+local function proceed()
+    if already_loaded then return end
+    local key = keyBox.Text
+    if not key or #key < 4 then return end
+    getgenv().script_key = key
+    local success, err = pcall(function()
+        loadstring(game:HttpGet(SCRIPT_URL[thisGame]))()
+    end)
+    if getgenv().NexusLoaded then
+        already_loaded = true
+        if G2L['1'] then G2L['1']:Destroy() end
+        return
+    else
+        tries = tries + 1
+        if tries >= 20 then
+            crash()
+        else
+            keyBox.Text = ''
+            keyBox.PlaceholderText = 'Invalid key, try again! (' .. tostring(20 - tries) .. ' tries left)'
+        end
+    end
+end
+
 G2L['14'].MouseButton1Click:Connect(function()
     showing = not showing
-    if showing then
-        keyBox.TextTransparency = 0
-    else
-        keyBox.TextTransparency = 1
-    end
+    keyBox.TextTransparency = showing and 0 or 1
 end)
 
 G2L['16'].MouseButton1Click:Connect(function()
@@ -331,64 +373,16 @@ G2L['16'].MouseButton1Click:Connect(function()
 end)
 
 G2L['19'].MouseButton1Click:Connect(function()
-    G2L['1']:Destroy()
+    if G2L['1'] then G2L['1']:Destroy() end
 end)
 
 copyKeyLink()
 
-local tries = 0
-local already_loaded = false
-
-function crash()
-    while true do
-    end
-end
-
-function proceed()
-    if already_loaded then
-        return
-    end
-    local key = keyBox.Text
-    if not key or #key < 4 then
-        return
-    end
-    getgenv().script_key = key
-    local loaded = false
-    local s, e = pcall(function()
-        loadstring(
-            game:HttpGet(
-                'https://api.luarmor.net/files/v3/loaders/f8306c717a2437ae14bf86eaac7f337d.lua'
-            )
-        )()
-    end)
-    if getgenv().NexusLoaded then
-        already_loaded = true
-        G2L['1']:Destroy()
-        return
-    else
-        tries = tries + 1
-        if tries >= 20 then
-            crash()
-        else
-            keyBox.Text = ''
-            keyBox.PlaceholderText = 'Invalid key, try again! ('
-                .. tostring(20 - tries)
-                .. ' tries left)'
-        end
-    end
-end
-
 keyBox.FocusLost:Connect(function(enter)
-    if enter then
-        proceed()
-    end
+    if enter then proceed() end
 end)
-
 keyBox.InputBegan:Connect(function(input)
-    if
-        input.UserInputType == Enum.UserInputType.Keyboard
-        and input.KeyCode == Enum.KeyCode.Return
-    then
+    if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Return then
         proceed()
     end
 end)
