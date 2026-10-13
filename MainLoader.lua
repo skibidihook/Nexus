@@ -17,6 +17,12 @@ local Games = {
         PlaceIds = { 4637668954 },
         Loader = "https://api.luarmor.net/files/v4/loaders/4001d0f7e1e434b1190cfd6788b4026d.lua",
     },
+    {
+        Name = "Bloxburg",
+        GameIds = { 88070565 },
+        PlaceIds = { 185655149 },
+        Loader = "https://api.luarmor.net/files/v4/loaders/f73cc28478673823813d31ed56cc086f.lua",
+    },
 }
 
 if not game:IsLoaded() then game.Loaded:Wait() end
