@@ -43,8 +43,9 @@ local function Round(Value)
 	return Floor(Value * 100 + 0.5) / 100
 end
 
-local function Profile(Height, Step, Cap)
-	return { Key = `{Round(Height)}|{Round(Step)}|{Round(Cap)}`, Height = Height, Step = Step, Cap = Cap }
+local function Profile(Height, Step, Cap, Jump, Drop)
+	Jump, Drop = Jump or Step, Drop or Step
+	return { Key = `{Round(Height)}|{Round(Step)}|{Round(Cap)}|{Round(Jump)}|{Round(Drop)}`, Height = Height, Step = Step, Cap = Cap, Jump = Jump, Drop = Drop }
 end
 
 function Agent.Walker(Options)
@@ -60,7 +61,7 @@ function Agent.Walker(Options)
 		Height = Height,
 		StepHeight = Step,
 		CostArray = Costs,
-		Profile = Profile(Height, Step, Max(Radius + 2, 3)),
+		Profile = Profile(Height, Step, Max(Radius + 2, 3), Max(Step, Options.JumpHeight or Step), Max(Step, Options.MaxDrop or Step)),
 	}
 end
 
@@ -172,6 +173,103 @@ function Agent.BloxburgTaxi(Options)
 end
 
 return Agent
+end
+Modules.Avoidance = function(Require)
+local Avoidance = {}
+
+function Avoidance.SegmentDistance(First, Second, Threat)
+    local X, Z = Second.X - First.X, Second.Z - First.Z
+    local Length = X * X + Z * Z
+    local Ratio = Length > 0 and math.clamp(((Threat.X - First.X) * X + (Threat.Z - First.Z) * Z) / Length, 0, 1) or 0
+    local Dx, Dz = First.X + X * Ratio - Threat.X, First.Z + Z * Ratio - Threat.Z
+    return math.sqrt(Dx * Dx + Dz * Dz)
+end
+
+function Avoidance.RouteClear(Points, Threat, Radius)
+    for Index = 2, #Points do
+        local First, Second = Points[Index - 1], Points[Index]
+        local Distance = Avoidance.SegmentDistance(First, Second, Threat)
+        if Distance < Radius then
+            local X, Z = First.X - Threat.X, First.Z - Threat.Z
+            local StartDistance = math.sqrt(X * X + Z * Z)
+            local DirectionX, DirectionZ = Second.X - First.X, Second.Z - First.Z
+            if StartDistance >= Radius or X * DirectionX + Z * DirectionZ <= 0 then return false, Index, Distance end
+        end
+    end
+    return true
+end
+
+function Avoidance.EscapeGoals(Origin, Threat, HalfSize, Options)
+    Options = Options or {}
+    local MakeVector = (Vector3 and Vector3.new) or vector.create
+    local Margin = Options.Margin or 16
+    local Clearance = Options.Clearance or 35
+    local function Distance(First, Second)
+        return math.sqrt((First.X - Second.X) ^ 2 + (First.Z - Second.Z) ^ 2)
+    end
+    local StartingDistance = Distance(Origin, Threat)
+    local Candidates = {}
+    local function Add(Goal)
+        Goal = MakeVector(math.clamp(Goal.X, -HalfSize.X + Margin, HalfSize.X - Margin), Origin.Y, math.clamp(Goal.Z, -HalfSize.Z + Margin, HalfSize.Z - Margin))
+        local Travel = Distance(Origin, Goal)
+        local Separation = Distance(Goal, Threat)
+        if Travel <= 20 or Separation <= (Options.MinSeparation or 65) then return end
+        if StartingDistance < 150 and not Avoidance.RouteClear({ Origin, Goal }, Threat, Clearance) then return end
+        local CenterDistance = math.sqrt(Goal.X * Goal.X + Goal.Z * Goal.Z)
+        local Score = Separation - Travel * 0.8 - math.max(0, CenterDistance - 160) * 0.7
+        table.insert(Candidates, { Goal = Goal, Score = Score, Short = Travel < 130 })
+    end
+    for _, Radius in next, { 50, 85, 120 } do
+        for Index = 0, 11 do
+            local Angle = Index * math.pi / 6
+            Add(Origin + MakeVector(math.cos(Angle) * Radius, 0, math.sin(Angle) * Radius))
+        end
+    end
+    for _, Offset in next, { MakeVector(-140, 0, -140), MakeVector(140, 0, -140), MakeVector(-140, 0, 140), MakeVector(140, 0, 140), MakeVector(-140, 0, 0), MakeVector(140, 0, 0), MakeVector(0, 0, -140), MakeVector(0, 0, 140) } do Add(Offset) end
+    table.sort(Candidates, function(First, Second)
+        if StartingDistance < 150 and First.Short ~= Second.Short then return First.Short end
+        return First.Score > Second.Score
+    end)
+	local Selected = {}
+	local Spacing = Options.GoalSpacing or 16
+	for _, Candidate in Candidates do
+		local Distinct = true
+		for _, Previous in Selected do
+			if Distance(Candidate.Goal, Previous.Goal) < Spacing then Distinct = false; break end
+		end
+		if Distinct then table.insert(Selected, Candidate) end
+	end
+	return Selected
+end
+
+function Avoidance.EscapeRegion(Origin, Threat, HalfSize, Options)
+    Options = Options or {}
+    local MakeVector = (Vector3 and Vector3.new) or vector.create
+    local Dx, Dz = Origin.X - Threat.X, Origin.Z - Threat.Z
+    local Separation = math.sqrt(Dx * Dx + Dz * Dz)
+    local Reach = Options.Reach or (Separation < 90 and 12 or 24)
+    local Margin = Options.Margin or 4
+    local Minimum = Separation < 90 and Separation + 6 or math.max(75, Separation - 32)
+    local Edge = math.min(HalfSize.X - math.abs(Origin.X), HalfSize.Z - math.abs(Origin.Z))
+    local X, Z
+    if Edge < 48 then
+        X, Z = -Origin.X, -Origin.Z
+    else
+        X, Z = Dx * 0.5 - Dz, Dz * 0.5 + Dx
+    end
+    local Length = math.sqrt(X * X + Z * Z)
+    if Length < 0.01 then X, Z, Length = 1, 0, 1 end
+    local Hint = MakeVector(Origin.X + X / Length * Reach, Origin.Y, Origin.Z + Z / Length * Reach)
+    local function Accept(Point)
+        if math.abs(Point.X) > HalfSize.X - Margin or math.abs(Point.Z) > HalfSize.Z - Margin then return false end
+        local Travel = math.sqrt((Point.X - Origin.X) ^ 2 + (Point.Z - Origin.Z) ^ 2)
+        local Distance = math.sqrt((Point.X - Threat.X) ^ 2 + (Point.Z - Threat.Z) ^ 2)
+        return Travel >= Reach and Distance >= Minimum
+    end
+    return Hint, Accept
+end
+
+return Avoidance
 end
 Modules.CarPlanner = function(Require)
 local Heap = Require("Heap")
@@ -2131,7 +2229,12 @@ function GridSearch.Context(Map, Agent, Options, Yield)
 				if IsBlocked(Cx, Cz) then return false end
 			end
 		end
-		return Key == KeyB and Span == SpanB
+		if Key ~= KeyB or Span ~= SpanB then return false end
+		if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
+			local Path = { MakeVector((Ax + 0.5) * Cell, Ya, (Az + 0.5) * Cell), MakeVector((Bx + 0.5) * Cell, Yb, (Bz + 0.5) * Cell) }
+			return Map.Source:ValidatePath(Path, Agent, { "Walk", Yb - Ya > Agent.StepHeight and "Jump" or "Walk" })
+		end
+		return true
 	end
 
 	Context.Load = Load
@@ -2158,6 +2261,9 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local ClimbWeight = Options.ClimbWeight or 0.5
 	local Tolerance = Options.Tolerance or Radius + 2
 	local VerticalTolerance = Options.VerticalTolerance or 5
+	local GoalRadius = Options.GoalRadius or 0
+	local GoalHeightOffset = Options.GoalHeightOffset or 0
+	local GoalTest = Options.GoalTest
 
 	local SKey, SSpan = Nearest(From.X, From.Y, From.Z, Options.Below, Options.Above)
 	if not SKey then
@@ -2167,7 +2273,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local GoalX, GoalY, GoalZ = To.X, To.Y, To.Z
 	local TargetX, TargetZ = GoalX, GoalZ
 	local GoalNode, Relocated
-	do
+	if not GoalTest then
 		local GKey, GSpan = Map:Locate(GoalX, GoalY, GoalZ, Agent.Profile, Yield, Options.Below, Options.Above)
 		if GKey and Context.Usable(GKey, GSpan, Radius) then
 			GoalNode = GKey * Shift + GSpan
@@ -2200,6 +2306,8 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local G, Parent, Closed = {}, {}, {}
 
 	local CurrentNode, CurrentBase, CurrentCost, CurrentY = 0, 0, 0, 0
+	local CurrentX, CurrentZ
+	local LinkCache = {}
 	local BMinX, BMaxX, BMinZ, BMaxZ = -Huge, Huge, -Huge, Huge
 	local Clipped = false
 
@@ -2225,7 +2333,20 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		end
 		if Blocked and Blocked[(Cx + 1048576) * 2097152 + Cz + 1048576] then return end
 		local NY = NTile.Floor[NSpan]
+		if (GoalRadius > 0 or Options.ValidateLinks) and Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
+			local X, Z = (Cx + 0.5) * Cell, (Cz + 0.5) * Cell
+			if Options.ValidateLinks or (X - GoalX) ^ 2 + (Z - GoalZ) ^ 2 < (GoalRadius + 12) ^ 2 then
+				local Key = tostring(CurrentNode) .. ":" .. tostring(NNode)
+				local Valid = LinkCache[Key]
+				if Valid == nil then
+					Valid = Map.Source:ValidatePath({ MakeVector(CurrentX, CurrentY, CurrentZ), MakeVector(X, NY, Z) }, Agent, { "Walk", NY - CurrentY > Agent.StepHeight and "Jump" or "Walk" })
+					LinkCache[Key] = Valid == true
+				end
+				if not Valid then return end
+			end
+		end
 		local Cost = CurrentBase + Unit * Cell * (CurrentCost + NCost) * 0.5 + Abs(NY - CurrentY) * ClimbWeight
+		if NY - CurrentY > Agent.StepHeight + 0.01 then Cost += Options.JumpCost or 0 end
 		if Clear < Radius + Comfort then Cost += (Radius + Comfort - Clear) * ProximityWeight * Unit end
 		local Old = G[NNode]
 		if Old and Old <= Cost then return end
@@ -2311,11 +2432,16 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 				local Dx, Dz = X - GoalX, Z - GoalZ
 				local Planar = Sqrt(Dx * Dx + Dz * Dz)
 				if Planar < BestDistance then BestNode, BestDistance = Node, Planar end
-				if Node == GoalNode or (not GoalNode and Planar <= Tolerance and Abs(Y - GoalY) <= VerticalTolerance) then
+				local HeightGap = Y + GoalHeightOffset - GoalY
+				local InRange = GoalRadius > 0 and Planar * Planar + HeightGap * HeightGap <= GoalRadius * GoalRadius
+				local Accepted = GoalTest and GoalTest(MakeVector(X, Y, Z), G[Node])
+				if Accepted or (not GoalTest and (InRange or Node == GoalNode or (not GoalNode and Planar <= Tolerance and Abs(Y - GoalY) <= VerticalTolerance))) then
 					Found = Node
+					if GoalTest then GoalX, GoalY, GoalZ = X, Y, Z end
 					return "Found"
 				end
 				CurrentNode, CurrentBase, CurrentCost, CurrentY = Node, G[Node], Costs[Tile.Surface[Span]], Y
+				CurrentX, CurrentZ = X, Z
 				local EK, ES = Step(Key, Tile, Data, Span, 1)
 				local WK, WS = Step(Key, Tile, Data, Span, 2)
 				local SK, SS = Step(Key, Tile, Data, Span, 3)
@@ -2362,7 +2488,9 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		local GoalKey = GoalNode // Shift
 		local StartCost = Costs[(Entries[SKey] or Load(SKey))[1].Surface[SSpan]]
 		local GoalCost = Costs[(Entries[GoalKey] or Load(GoalKey))[1].Surface[GoalNode - GoalKey * Shift]]
-		if Visible(Start, GoalNode, Max(StartCost, GoalCost) * (Options.SmoothCostSlack or 1.3) + 1e-6, Options.SmoothMargin or Cell * 0.5, Options.VerticalSlack or 1) then
+		local StartFloor = Entries[SKey][1].Floor[SSpan]
+		local GoalFloor = Entries[GoalKey][1].Floor[GoalNode - GoalKey * Shift]
+		if Abs(GoalFloor - StartFloor) <= Agent.StepHeight and Visible(Start, GoalNode, Max(StartCost, GoalCost) * (Options.SmoothCostSlack or 1.3) + 1e-6, Options.SmoothMargin or Cell * 0.5, Options.VerticalSlack or 1) then
 			Found = GoalNode
 			Parent[GoalNode] = Start
 			Direct = true
@@ -2420,10 +2548,12 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	end
 
 	local NodeCost = table.create(Count)
+	local NodeHeight = table.create(Count)
 	for Index = 1, Count do
 		local K = Chain[Index] // Shift
 		local Entry = Entries[K] or Load(K)
 		NodeCost[Index] = Costs[Entry[1].Surface[Chain[Index] - K * Shift]]
+		NodeHeight[Index] = Entry[1].Floor[Chain[Index] - K * Shift]
 	end
 
 	local Kept = { 1 }
@@ -2438,6 +2568,13 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 			end
 			return Value * CostSlack + 1e-6
 		end
+		local function CanSmooth(A, B)
+			if B == A + 1 then return true end
+			for Index = A + 1, B do
+				if Abs(NodeHeight[Index] - NodeHeight[Index - 1]) > Agent.StepHeight + 0.01 then return false end
+			end
+			return true
+		end
 		local Anchor = 1
 		while Anchor < Count do
 			local Good, Bad = Anchor + 1, nil
@@ -2445,7 +2582,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 			while true do
 				local Probe = Min(Anchor + Stride, Count)
 				if Probe <= Good then break end
-				if Visible(Chain[Anchor], Chain[Probe], Limit(Anchor, Probe), SmoothMargin, Slack) then
+				if CanSmooth(Anchor, Probe) and Visible(Chain[Anchor], Chain[Probe], Limit(Anchor, Probe), SmoothMargin, Slack) then
 					Good = Probe
 					if Probe == Count then break end
 					Stride *= 2
@@ -2457,7 +2594,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 			if Bad then
 				while Bad - Good > 1 do
 					local Middle = (Good + Bad) // 2
-					if Visible(Chain[Anchor], Chain[Middle], Limit(Anchor, Middle), SmoothMargin, Slack) then
+					if CanSmooth(Anchor, Middle) and Visible(Chain[Anchor], Chain[Middle], Limit(Anchor, Middle), SmoothMargin, Slack) then
 						Good = Middle
 					else
 						Bad = Middle
@@ -2473,6 +2610,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	end
 
 	local Points = table.create(#Kept)
+	local Actions = table.create(#Kept, "Walk")
 	local Length = 0
 	local LastX, LastY, LastZ
 	for Index = 1, #Kept do
@@ -2491,6 +2629,11 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		end
 		LastX, LastY, LastZ = X, Y, Z
 		Points[Index] = MakeVector(X, Y, Z)
+		if Index > 1 then
+			for Raw = Kept[Index - 1] + 1, Kept[Index] do
+				if NodeHeight[Raw] - NodeHeight[Raw - 1] > Agent.StepHeight + 0.01 then Actions[Index] = "Jump"; break end
+			end
+		end
 	end
 
 	local Status = "Complete"
@@ -2503,6 +2646,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		Status = Status,
 		Complete = Found ~= nil,
 		Points = Points,
+		Actions = Actions,
 		Length = Length,
 		Nodes = Count,
 		Expanded = Expanded,
@@ -2586,6 +2730,66 @@ end
 
 return Heap
 end
+Modules.HumanoidMover = function(Require)
+local function Resolve(Value)
+    if type(Value) == "function" then return Value() end
+    return Value
+end
+
+return function(Options)
+    local Clock = Options.Clock or os.clock
+    local Waiter = Options.Waiter
+    local MakeVector = Options.Vector or (Vector3 and Vector3.new) or vector.create
+    local Zero = MakeVector(0, 0, 0)
+    return function(Points, Handle)
+        local Humanoid = Resolve(Options.Humanoid)
+        local Root = Humanoid and Humanoid.Parent and Humanoid.Parent:FindFirstChild("HumanoidRootPart")
+        if not (Humanoid and Root and Root.Parent and Humanoid.Health > 0) then return "NoRoot" end
+        local Reach = Options.Reach or 0.5
+        local VerticalReach = Options.VerticalReach or 3
+        local StuckTime = Options.StuckTime or 1.5
+        local function Move(Direction)
+            if Options.ApplyMove then Options.ApplyMove(Humanoid, Direction) else Humanoid:Move(Direction, false) end
+        end
+        local function Finish(Outcome)
+            Move(Zero)
+            return Outcome
+        end
+        for Index = 2, #Points do
+            local Target = Points[Index]
+            local Position = Root.Position
+            local Dx, Dz = Target.X - Position.X, Target.Z - Position.Z
+            local BestDistance = math.sqrt(Dx * Dx + Dz * Dz)
+            local LastProgress = Clock()
+            local Deadline = Clock() + BestDistance / math.max(Humanoid.WalkSpeed, 1) * 3 + 3
+            Handle.Target = Target
+            if Handle.Status ~= "Running" then return Finish("Cancelled") end
+            if Options.Actions and Options.Actions[Index] == "Jump" and Options.Jump then Options.Jump(Humanoid) end
+            while true do
+                if Handle.Status ~= "Running" then return Finish("Cancelled") end
+                if not Root.Parent or Humanoid.Health <= 0 then return Finish("NoRoot") end
+                Position = Root.Position
+                Dx, Dz = Target.X - Position.X, Target.Z - Position.Z
+                local Distance = math.sqrt(Dx * Dx + Dz * Dz)
+                Handle.TargetDistance = Distance
+                local Offset = Resolve(Options.Offset) or 3
+                if Distance <= Reach and math.abs(Position.Y - Target.Y - Offset) <= VerticalReach then break end
+                if Distance < BestDistance - (Options.ProgressEpsilon or 0.1) then
+                    BestDistance, LastProgress = Distance, Clock()
+                elseif Clock() - LastProgress > StuckTime or Clock() > Deadline then
+                    Handle.StuckPosition = Position
+                    Handle.StuckTarget = Target
+                    return Finish("Stuck")
+                end
+                if Distance > 0.01 then Move(MakeVector(Dx / Distance, 0, Dz / Distance)) else Move(Zero) end
+                Waiter()
+            end
+            Handle.Progress = Index
+        end
+        return Finish("Arrived")
+    end
+end
+end
 Modules.Init = function(Require)
 local Surface = Require("Surface")
 local Geometry = Require("Geometry")
@@ -2598,11 +2802,12 @@ local ShapeSource = Require("ShapeSource")
 local IsRoblox = typeof ~= nil and game ~= nil and typeof(game) == "Instance"
 
 local Pathfinding = {
-	Version = "0.1.0",
+	Version = "0.1.1",
 	IsRoblox = IsRoblox,
 	Surface = Surface,
 	Geometry = Geometry,
 	Agent = Agent,
+	Avoidance = Require("Avoidance"),
 	ShapeSource = ShapeSource,
 	FixtureSource = Require("FixtureSource"),
 	Lanes = Require("Lanes"),
@@ -2748,16 +2953,19 @@ if IsRoblox then
 
 	function Pathfinding.Walk(Map, Who, Options)
 		Options = Options or {}
+		local SearchOptions = table.clone(Options)
+		SearchOptions.Blocked = table.clone(Options.Blocked or {})
 		local Mover = Options.Mover or Movers.Lerp({ Root = Options.Root, Speed = Options.Speed })
 		return Spawn(function(Handle)
 			local Attempts = 0
 			while Handle.Status == "Running" do
 				Attempts += 1
+				Handle.Attempts = Attempts
 				local Root = Resolve(Options.Root)
 				local From = Options.From and Resolve(Options.From) or (Root and Root.Position)
 				if not From then Handle:Finish("Failed", nil, "NoRoot"); return end
 				local Goal = Resolve(Options.Goal)
-				local Request = Pathfinding.FindPath(Map, Who, From, Goal, Options)
+				local Request = Pathfinding.FindPath(Map, Who, From, Goal, SearchOptions)
 				Handle.Inner = Request
 				local Path = Request:Await(Options.PlanTimeout or 15)
 				Handle.Inner = nil
@@ -2765,8 +2973,31 @@ if IsRoblox then
 				if not Path or #Path.Points == 0 then Handle:Finish("Failed", Path, Path and Path.Status or "PlanFailed"); return end
 				Handle.Path = Path
 				if Options.OnPath then pcall(Options.OnPath, Path) end
+				if not Path.Complete and not Options.AllowPartial then
+					Handle:Finish(Path.Status or "Unreachable", Path, "IncompleteRoute")
+					return
+				end
+				if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
+					local Valid, Position, Blocker = Map.Source:ValidatePath(Path.Points, Who, Path.Actions)
+					if not Valid then
+						Handle.Blocker = Blocker
+						Handle.BlockedPosition = Position
+						if Attempts >= (Options.Attempts or 4) then Handle:Finish("Failed", Path, "BlockedRoute"); return end
+						local Reach = Who.Radius + Map.Cell
+						Map:Invalidate(Position.X - Reach, Position.Z - Reach, Position.X + Reach, Position.Z + Reach)
+						for X = math.floor((Position.X - Reach) / Map.Cell), math.floor((Position.X + Reach) / Map.Cell) do
+							for Z = math.floor((Position.Z - Reach) / Map.Cell), math.floor((Position.Z + Reach) / Map.Cell) do
+								if ((X + 0.5) * Map.Cell - Position.X) ^ 2 + ((Z + 0.5) * Map.Cell - Position.Z) ^ 2 <= Reach ^ 2 then
+									SearchOptions.Blocked[(X + 1048576) * 2097152 + Z + 1048576] = true
+								end
+							end
+						end
+						continue
+					end
+				end
 				local Outcome = Mover(Path.Points, Handle)
 				if Handle.Status ~= "Running" then return end
+				if Outcome == "Threat" then Handle:Finish("Cancelled", Path, "Threat"); return end
 				if Outcome == "Arrived" and Path.Complete then Handle:Finish("Done", Path); return end
 				if Outcome == "Arrived" and Path.Status == "Unreachable" then Handle:Finish("Unreachable", Path); return end
 				if Outcome == "NoRoot" or Attempts >= (Options.Attempts or 4) then
@@ -2778,6 +3009,11 @@ if IsRoblox then
 					if Here then
 						local P = Here.Position
 						Map:Invalidate(P.X - 24, P.Z - 24, P.X + 24, P.Z + 24)
+						if Handle.StuckTarget then
+							local Target = Handle.StuckTarget
+							local X, Z = math.floor(Target.X / Map.Cell), math.floor(Target.Z / Map.Cell)
+							SearchOptions.Blocked[(X + 1048576) * 2097152 + Z + 1048576] = true
+						end
 					end
 				end
 			end
@@ -2923,6 +3159,23 @@ function Inputs.Callback(Fn)
 end
 
 return Inputs
+end
+Modules.KeyboardSteering = function(Require)
+local KeyboardSteering = {}
+
+function KeyboardSteering.Keys(Direction, Forward, Right)
+    local Length = math.sqrt(Forward.X * Forward.X + Forward.Z * Forward.Z)
+    local SideLength = math.sqrt(Right.X * Right.X + Right.Z * Right.Z)
+    if Length < 0.001 or SideLength < 0.001 then return {} end
+    local Front = (Direction.X * Forward.X + Direction.Z * Forward.Z) / Length
+    local Side = (Direction.X * Right.X + Direction.Z * Right.Z) / SideLength
+    local Keys = {}
+    if Front > 0.3 then Keys.W = true elseif Front < -0.3 then Keys.S = true end
+    if Side > 0.3 then Keys.D = true elseif Side < -0.3 then Keys.A = true end
+    return Keys
+end
+
+return KeyboardSteering
 end
 Modules.Lanes = function(Require)
 local Lanes = {}
@@ -3331,6 +3584,8 @@ return Lanes
 end
 Modules.Movers = function(Require)
 local Movers = {}
+local HumanoidMover = Require("HumanoidMover")
+local KeyboardSteering = Require("KeyboardSteering")
 
 local RunService = game:GetService("RunService")
 
@@ -3381,46 +3636,97 @@ function Movers.Lerp(Options)
 end
 
 function Movers.Humanoid(Options)
-	Options = Options or {}
-	return function(Points, Handle)
-		local Humanoid = Resolve(Options.Humanoid)
-		local Root = Humanoid and Humanoid.Parent and Humanoid.Parent:FindFirstChild("HumanoidRootPart")
-		if not (Humanoid and Root) then return "NoRoot" end
-		local Reach = Options.Reach or 1.5
-		local StuckTime = Options.StuckTime or 1.2
-		for Index = 2, #Points do
-			local Target = Points[Index]
-			local Last, LastMoved = Root.Position, os.clock()
-			local Deadline = os.clock() + (Target - Root.Position).Magnitude / math.max(Humanoid.WalkSpeed, 1) * 2 + 2
-			Humanoid:MoveTo(Target)
-			while true do
-				RunService.Heartbeat:Wait()
-				if Handle.Status ~= "Running" then
-					Humanoid:Move(Vector3.zero)
-					return "Cancelled"
-				end
-				if not Root.Parent or Humanoid.Health <= 0 then return "NoRoot" end
-				local Position = Root.Position
-				local Flat = Vector3.new(Target.X - Position.X, 0, Target.Z - Position.Z)
-				if Flat.Magnitude <= Reach then break end
-				if (Position - Last).Magnitude > 0.5 then
-					Last, LastMoved = Position, os.clock()
-				elseif os.clock() - LastMoved > StuckTime then
-					return "Stuck"
-				end
-				if os.clock() > Deadline then return "Stuck" end
-				Humanoid:MoveTo(Target)
-			end
-			Handle.Progress = Index
-		end
-		return "Arrived"
-	end
+    Options = table.clone(Options or {})
+    Options.Waiter = Options.Waiter or function() RunService.Heartbeat:Wait() end
+    Options.Offset = Options.Offset or function()
+        local Humanoid = Resolve(Options.Humanoid)
+        return Movers.RootOffset(Humanoid and Humanoid.Parent)
+    end
+    return function(Points, Handle)
+        local Direction = Vector3.zero
+        local Humanoid = Resolve(Options.Humanoid)
+        local Connection
+        Connection = RunService.PreSimulation:Connect(function()
+            if Handle.Status ~= "Running" or not (Humanoid and Humanoid.Parent and Humanoid.Health > 0) then
+                Connection:Disconnect()
+                if Humanoid and Humanoid.Parent then Humanoid:Move(Vector3.zero, false) end
+                return
+            end
+            if Humanoid.Parent:GetAttribute("Hiding") or Humanoid.Parent:GetAttribute("IsInjured") then
+                Humanoid:Move(Vector3.zero, false)
+                return
+            end
+            Humanoid:Move(Direction, false)
+        end)
+        local Settings = table.clone(Options)
+        Settings.Actions = Settings.Actions or (Handle.Path and Handle.Path.Points == Points and Handle.Path.Actions)
+        Settings.Jump = Settings.Jump or function(Body) Body.Jump = true end
+        Settings.ApplyMove = function(Body, Value) Direction = Value; Body:Move(Value, false) end
+        local Ok, Outcome = pcall(HumanoidMover(Settings), Points, Handle)
+        Connection:Disconnect()
+        if Humanoid and Humanoid.Parent then Humanoid:Move(Vector3.zero, false) end
+        if not Ok then error(Outcome, 0) end
+        return Outcome
+    end
 end
 
 function Movers.Callback(Fn)
 	return function(Points, Handle)
 		return Fn(Points, Handle) or "Arrived"
 	end
+end
+
+function Movers.Keyboard(Options)
+    Options = table.clone(Options or {})
+    local Input = Options.Input or game:GetService("VirtualInputManager")
+    Options.Waiter = Options.Waiter or function() RunService.Heartbeat:Wait() end
+    Options.Offset = Options.Offset or function()
+        local Humanoid = Resolve(Options.Humanoid)
+        return Movers.RootOffset(Humanoid and Humanoid.Parent)
+    end
+    return function(Points, Handle)
+        local Held = {}
+        local function SetKeys(Keys)
+            for _, Name in next, { "W", "A", "S", "D" } do
+                local Down = Keys[Name] == true
+                if Down ~= (Held[Name] == true) then
+                    Input:SendKeyEvent(Down, Enum.KeyCode[Name], false, game)
+                    Held[Name] = Down
+                end
+            end
+        end
+        local Connection
+        local function Release()
+            SetKeys({})
+            if Held.Space then Input:SendKeyEvent(false, Enum.KeyCode.Space, false, game); Held.Space = false end
+        end
+        Connection = RunService.Heartbeat:Connect(function()
+            if Handle.Status ~= "Running" then
+                pcall(Release)
+                Connection:Disconnect()
+            end
+        end)
+        local Settings = table.clone(Options)
+        Settings.Actions = Settings.Actions or (Handle.Path and Handle.Path.Points == Points and Handle.Path.Actions)
+        Settings.Jump = Settings.Jump or function()
+            Held.Space = true
+            Input:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.delay(0.1, function()
+                if Held.Space then pcall(Input.SendKeyEvent, Input, false, Enum.KeyCode.Space, false, game); Held.Space = false end
+            end)
+        end
+        Settings.ApplyMove = function(Body, Direction)
+            local Camera = workspace.CurrentCamera
+            if not Camera or Body.Parent:GetAttribute("Hiding") or Body.Parent:GetAttribute("IsInjured") then SetKeys({}); return end
+            SetKeys(KeyboardSteering.Keys(Direction, Camera.CFrame.LookVector, Camera.CFrame.RightVector))
+        end
+        local Ok, Outcome = pcall(HumanoidMover(Settings), Points, Handle)
+        Connection:Disconnect()
+        local Released, ReleaseError = pcall(Release)
+        if not Ok then error(Outcome, 0) end
+        if not Released then error(ReleaseError, 0) end
+        return Outcome
+    end
 end
 
 return Movers
@@ -4494,6 +4800,12 @@ function RobloxSource.new(Options)
 	if Options.CollisionGroup then Overlap.CollisionGroup = Options.CollisionGroup end
 	local Single = RaycastParams.new()
 	Single.FilterType = Enum.RaycastFilterType.Include
+	Single.RespectCanCollide = true
+	local Sweep = RaycastParams.new()
+	Sweep.FilterType = Enum.RaycastFilterType.Exclude
+	Sweep.FilterDescendantsInstances = Options.Ignore or {}
+	Sweep.RespectCanCollide = true
+	if Options.CollisionGroup then Single.CollisionGroup = Options.CollisionGroup; Sweep.CollisionGroup = Options.CollisionGroup end
 	local Wet = RaycastParams.new()
 	Wet.FilterType = Enum.RaycastFilterType.Include
 	Wet.FilterDescendantsInstances = { Workspace.Terrain }
@@ -4505,6 +4817,7 @@ function RobloxSource.new(Options)
 	local self = setmetatable({
 		Overlap = Overlap,
 		Single = Single,
+		Sweep = Sweep,
 		Wet = Wet,
 		Dry = Dry,
 		Classify = Options.Classify,
@@ -4522,6 +4835,54 @@ end
 
 function RobloxSource:SetIgnore(List)
 	self.Overlap.FilterDescendantsInstances = List
+	self.Sweep.FilterDescendantsInstances = List
+end
+
+function RobloxSource:ValidatePath(Points, Agent, Actions)
+	if (Agent.Profile.Jump or 0) > Agent.StepHeight then
+		for Index = 2, #Points do
+			local Point = Points[Index]
+			local Probe = Agent.Profile.Jump
+			local FloorHit = Raycast(Workspace, Point + Vector3New(0, Probe, 0), Vector3New(0, -Probe - 0.25, 0), self.Sweep)
+			if FloorHit and FloorHit.Normal.Y > 0.65 and FloorHit.Position.Y > Point.Y + 0.15 and FloorHit.Position.Y - Point.Y <= Probe then
+				Points[Index] = Vector3New(Point.X, FloorHit.Position.Y, Point.Z)
+			end
+			if Actions and Points[Index].Y - Points[Index - 1].Y > Agent.StepHeight then Actions[Index] = "Jump" end
+		end
+	end
+	local Step = math.min(Agent.StepHeight or 0, Agent.Height - 0.2)
+	local Height = Agent.Height - Step - 0.1
+	local Offset = Vector3New(0, Step + Height * 0.5 + 0.05, 0)
+	local Size = Vector3New(Agent.Radius * 2, Height, Agent.Radius * 2)
+	for Index = 2, #Points do
+		local Start = Points[Index - 1] + Offset
+		local Delta = Points[Index] - Points[Index - 1]
+		if Delta.Magnitude > 0.01 then
+			local Segments = Actions and Actions[Index] == "Jump" and 6 or 1
+			local Arc = Segments > 1 and math.max(0, (Agent.Profile.Jump or Agent.StepHeight) - math.max(Delta.Y, 0) * 0.5) or 0
+			local Previous = Start
+			for Segment = 1, Segments do
+				local Ratio = Segment / Segments
+				local Next = Start + Delta * Ratio + Vector3New(0, Arc * 4 * Ratio * (1 - Ratio), 0)
+				local Hit = Workspace:Blockcast(CFrameNew(Previous), Size, Next - Previous, self.Sweep)
+				if Hit then
+					if Actions and Actions[Index] ~= "Jump" and (Agent.Profile.Jump or 0) > Agent.StepHeight then
+						local Part = Hit.Instance
+						local Frame, PartSize = Part.CFrame, Part.Size
+						local Extent = (math.abs(Frame.XVector.Y) * PartSize.X + math.abs(Frame.YVector.Y) * PartSize.Y + math.abs(Frame.ZVector.Y) * PartSize.Z) * 0.5
+						local Rise = Part.Position.Y + Extent - Points[Index - 1].Y
+						if Rise > 0 and Rise <= Agent.Profile.Jump - 0.5 then
+							Actions[Index] = "Jump"
+							return self:ValidatePath(Points, Agent, Actions)
+						end
+					end
+					return false, Hit.Position, Hit.Instance
+				end
+				Previous = Next
+			end
+		end
+	end
+	return true
 end
 
 function RobloxSource:Entry(Part)
@@ -5314,6 +5675,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	if Yield then Yield() end
 
 	local Height, Step = Profile.Height, Profile.Step
+	local Jump, Drop = Profile.Jump or Step, Profile.Drop or Step
 	local Walk = table.create(Total, false)
 	for I = 1, Total do Walk[I] = RCeil[I] - RFloor[I] >= Height end
 	local CE, CW, CS, CN = table.create(Total, 0), table.create(Total, 0), table.create(Total, 0), table.create(Total, 0)
@@ -5327,7 +5689,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 			if not Walk[F] then return 0 end
 			local OtherFloor = RFloor[F]
 			local Gap = OtherFloor - MyFloor
-			if Gap > Step or Gap < -Step then return 0 end
+			if Gap > Jump or Gap < -Drop then return 0 end
 			local OtherCeil = RCeil[F]
 			local Low = MyCeil < OtherCeil and MyCeil or OtherCeil
 			local High = MyFloor > OtherFloor and MyFloor or OtherFloor
@@ -5338,7 +5700,8 @@ function World:BuildProfile(Tile, Profile, Yield)
 			if Walk[J] then
 				local OtherFloor = RFloor[J]
 				local Gap = Abs(OtherFloor - MyFloor)
-				if Gap <= Step and Gap < BestGap then
+				local Rise = OtherFloor - MyFloor
+				if Rise <= Jump and Rise >= -Drop and Gap < BestGap then
 					local OtherCeil = RCeil[J]
 					local Low = MyCeil < OtherCeil and MyCeil or OtherCeil
 					local High = MyFloor > OtherFloor and MyFloor or OtherFloor

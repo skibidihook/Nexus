@@ -30,8 +30,9 @@ local function Round(Value)
 	return Floor(Value * 100 + 0.5) / 100
 end
 
-local function Profile(Height, Step, Cap)
-	return { Key = `{Round(Height)}|{Round(Step)}|{Round(Cap)}`, Height = Height, Step = Step, Cap = Cap }
+local function Profile(Height, Step, Cap, Jump, Drop)
+	Jump, Drop = Jump or Step, Drop or Step
+	return { Key = `{Round(Height)}|{Round(Step)}|{Round(Cap)}|{Round(Jump)}|{Round(Drop)}`, Height = Height, Step = Step, Cap = Cap, Jump = Jump, Drop = Drop }
 end
 
 function Agent.Walker(Options)
@@ -47,7 +48,7 @@ function Agent.Walker(Options)
 		Height = Height,
 		StepHeight = Step,
 		CostArray = Costs,
-		Profile = Profile(Height, Step, Max(Radius + 2, 3)),
+		Profile = Profile(Height, Step, Max(Radius + 2, 3), Max(Step, Options.JumpHeight or Step), Max(Step, Options.MaxDrop or Step)),
 	}
 end
 

@@ -1,4 +1,6 @@
 local Movers = {}
+local HumanoidMover = Require("HumanoidMover")
+local KeyboardSteering = Require("KeyboardSteering")
 
 local RunService = game:GetService("RunService")
 
@@ -49,46 +51,97 @@ function Movers.Lerp(Options)
 end
 
 function Movers.Humanoid(Options)
-	Options = Options or {}
-	return function(Points, Handle)
-		local Humanoid = Resolve(Options.Humanoid)
-		local Root = Humanoid and Humanoid.Parent and Humanoid.Parent:FindFirstChild("HumanoidRootPart")
-		if not (Humanoid and Root) then return "NoRoot" end
-		local Reach = Options.Reach or 1.5
-		local StuckTime = Options.StuckTime or 1.2
-		for Index = 2, #Points do
-			local Target = Points[Index]
-			local Last, LastMoved = Root.Position, os.clock()
-			local Deadline = os.clock() + (Target - Root.Position).Magnitude / math.max(Humanoid.WalkSpeed, 1) * 2 + 2
-			Humanoid:MoveTo(Target)
-			while true do
-				RunService.Heartbeat:Wait()
-				if Handle.Status ~= "Running" then
-					Humanoid:Move(Vector3.zero)
-					return "Cancelled"
-				end
-				if not Root.Parent or Humanoid.Health <= 0 then return "NoRoot" end
-				local Position = Root.Position
-				local Flat = Vector3.new(Target.X - Position.X, 0, Target.Z - Position.Z)
-				if Flat.Magnitude <= Reach then break end
-				if (Position - Last).Magnitude > 0.5 then
-					Last, LastMoved = Position, os.clock()
-				elseif os.clock() - LastMoved > StuckTime then
-					return "Stuck"
-				end
-				if os.clock() > Deadline then return "Stuck" end
-				Humanoid:MoveTo(Target)
-			end
-			Handle.Progress = Index
-		end
-		return "Arrived"
-	end
+    Options = table.clone(Options or {})
+    Options.Waiter = Options.Waiter or function() RunService.Heartbeat:Wait() end
+    Options.Offset = Options.Offset or function()
+        local Humanoid = Resolve(Options.Humanoid)
+        return Movers.RootOffset(Humanoid and Humanoid.Parent)
+    end
+    return function(Points, Handle)
+        local Direction = Vector3.zero
+        local Humanoid = Resolve(Options.Humanoid)
+        local Connection
+        Connection = RunService.PreSimulation:Connect(function()
+            if Handle.Status ~= "Running" or not (Humanoid and Humanoid.Parent and Humanoid.Health > 0) then
+                Connection:Disconnect()
+                if Humanoid and Humanoid.Parent then Humanoid:Move(Vector3.zero, false) end
+                return
+            end
+            if Humanoid.Parent:GetAttribute("Hiding") or Humanoid.Parent:GetAttribute("IsInjured") then
+                Humanoid:Move(Vector3.zero, false)
+                return
+            end
+            Humanoid:Move(Direction, false)
+        end)
+        local Settings = table.clone(Options)
+        Settings.Actions = Settings.Actions or (Handle.Path and Handle.Path.Points == Points and Handle.Path.Actions)
+        Settings.Jump = Settings.Jump or function(Body) Body.Jump = true end
+        Settings.ApplyMove = function(Body, Value) Direction = Value; Body:Move(Value, false) end
+        local Ok, Outcome = pcall(HumanoidMover(Settings), Points, Handle)
+        Connection:Disconnect()
+        if Humanoid and Humanoid.Parent then Humanoid:Move(Vector3.zero, false) end
+        if not Ok then error(Outcome, 0) end
+        return Outcome
+    end
 end
 
 function Movers.Callback(Fn)
 	return function(Points, Handle)
 		return Fn(Points, Handle) or "Arrived"
 	end
+end
+
+function Movers.Keyboard(Options)
+    Options = table.clone(Options or {})
+    local Input = Options.Input or game:GetService("VirtualInputManager")
+    Options.Waiter = Options.Waiter or function() RunService.Heartbeat:Wait() end
+    Options.Offset = Options.Offset or function()
+        local Humanoid = Resolve(Options.Humanoid)
+        return Movers.RootOffset(Humanoid and Humanoid.Parent)
+    end
+    return function(Points, Handle)
+        local Held = {}
+        local function SetKeys(Keys)
+            for _, Name in next, { "W", "A", "S", "D" } do
+                local Down = Keys[Name] == true
+                if Down ~= (Held[Name] == true) then
+                    Input:SendKeyEvent(Down, Enum.KeyCode[Name], false, game)
+                    Held[Name] = Down
+                end
+            end
+        end
+        local Connection
+        local function Release()
+            SetKeys({})
+            if Held.Space then Input:SendKeyEvent(false, Enum.KeyCode.Space, false, game); Held.Space = false end
+        end
+        Connection = RunService.Heartbeat:Connect(function()
+            if Handle.Status ~= "Running" then
+                pcall(Release)
+                Connection:Disconnect()
+            end
+        end)
+        local Settings = table.clone(Options)
+        Settings.Actions = Settings.Actions or (Handle.Path and Handle.Path.Points == Points and Handle.Path.Actions)
+        Settings.Jump = Settings.Jump or function()
+            Held.Space = true
+            Input:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.delay(0.1, function()
+                if Held.Space then pcall(Input.SendKeyEvent, Input, false, Enum.KeyCode.Space, false, game); Held.Space = false end
+            end)
+        end
+        Settings.ApplyMove = function(Body, Direction)
+            local Camera = workspace.CurrentCamera
+            if not Camera or Body.Parent:GetAttribute("Hiding") or Body.Parent:GetAttribute("IsInjured") then SetKeys({}); return end
+            SetKeys(KeyboardSteering.Keys(Direction, Camera.CFrame.LookVector, Camera.CFrame.RightVector))
+        end
+        local Ok, Outcome = pcall(HumanoidMover(Settings), Points, Handle)
+        Connection:Disconnect()
+        local Released, ReleaseError = pcall(Release)
+        if not Ok then error(Outcome, 0) end
+        if not Released then error(ReleaseError, 0) end
+        return Outcome
+    end
 end
 
 return Movers

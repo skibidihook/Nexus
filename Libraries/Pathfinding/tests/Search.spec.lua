@@ -163,4 +163,90 @@ T.Case("random maze performance", function()
 	T.True(Result.Complete or Result.Distance < 20, "reaches or nearly reaches the goal")
 end)
 
+T.Case("jump links reach a platform higher than the step limit", function()
+    local Source = Pathfinding.ShapeSource.new()
+    Ground(Source)
+    Source:Box(30, 2, 0, 16, 4, 16)
+    local Map = World.new(Source, {})
+    local From, To = Point(10.5, 0, 0.5), Point(30.5, 4, 0.5)
+    T.True(not GridSearch.Find(Map, Walker, From, To, {}).Complete)
+    local Jumper = Pathfinding.Agent.Walker({ Radius = 1.5, Height = 5, JumpHeight = 4.5, MaxDrop = 4.5 })
+    local Result = GridSearch.Find(Map, Jumper, From, To, {})
+    T.True(Result.Complete)
+    local Jumps = 0
+    for Index, Action in Result.Actions do
+        if Action == "Jump" then
+            Jumps += 1
+            T.True(Index > 1 and Result.Points[Index].Y - Result.Points[Index - 1].Y > Jumper.StepHeight)
+        end
+    end
+    T.True(Jumps > 0, "smoothing preserves a jump action")
+end)
+
+T.Case("interaction range can reach a prompt without climbing its object", function()
+    local Source = Pathfinding.ShapeSource.new()
+    Ground(Source)
+    Source:Box(30, 4, 0, 10, 8, 10)
+    local Map = World.new(Source, {})
+    local From, To = Point(10.5, 0, 0.5), Point(30.5, 8, 0.5)
+    T.True(not GridSearch.Find(Map, Walker, From, To, {}).Complete)
+    local Result = GridSearch.Find(Map, Walker, From, To, { GoalRadius = 10, GoalHeightOffset = 3 })
+    T.True(Result.Complete)
+    local Last = Result.Points[#Result.Points]
+    T.True((Last.X - To.X) ^ 2 + (Last.Y + 3 - To.Y) ^ 2 + (Last.Z - To.Z) ^ 2 <= 100)
+end)
+
+T.Case("collision validated approach links avoid an unsampled barrier", function()
+    local Source = Pathfinding.ShapeSource.new()
+    Ground(Source)
+    function Source:ValidatePath(Points)
+        for Index = 2, #Points do
+            local A, B = Points[Index - 1], Points[Index]
+            if (A.X - 35) * (B.X - 35) <= 0 and math.abs(B.X - A.X) > 0.001 then
+                local Ratio = (35 - A.X) / (B.X - A.X)
+                local Z = A.Z + (B.Z - A.Z) * Ratio
+                if math.abs(Z) < 10 then return false end
+            end
+        end
+        return true
+    end
+    local Map = World.new(Source, {})
+    local Result = GridSearch.Find(Map, Walker, Point(10.5, 0, 0.5), Point(50.5, 0, 0.5), { GoalRadius = 8, GoalHeightOffset = 3 })
+    T.True(Result.Complete)
+    T.True(Source:ValidatePath(Result.Points))
+end)
+
+T.Case("jump penalties prefer walking around a short low barrier", function()
+    local Source = Pathfinding.ShapeSource.new()
+    Ground(Source)
+    Source:Box(30, 1.5, 0, 2, 3, 12)
+    local Map = World.new(Source, {})
+    local Jumper = Pathfinding.Agent.Walker({ Radius = 1.5, Height = 5, JumpHeight = 4.5, MaxDrop = 4.5 })
+    local Result = GridSearch.Find(Map, Jumper, Point(10.5, 0, 0.5), Point(50.5, 0, 0.5), { JumpCost = 100 })
+    T.True(Result.Complete)
+    for _, Action in Result.Actions do T.True(Action ~= "Jump") end
+end)
+
+T.Case("a goal region selects a reachable exit instead of an enclosed hint", function()
+    local Source = Pathfinding.ShapeSource.new()
+    Ground(Source)
+    Source:Box(20, 5, 0, 12, 10, 12)
+    local Result = Find(Source, Point(0, 0, 0), Point(20, 0, 0), {
+        GoalTest = function(P) return P.Z >= 16 end,
+        MaxNodes = 3000,
+    })
+    T.True(Result.Complete)
+    T.True(Result.Points[#Result.Points].Z >= 16)
+end)
+
+T.Case("a goal region cannot succeed merely by reaching its hint", function()
+    local Source = Pathfinding.ShapeSource.new()
+    Ground(Source)
+    local Result = Find(Source, Point(0, 0, 0), Point(4, 0, 0), {
+        GoalTest = function() return false end,
+        MaxNodes = 200,
+    })
+    T.True(not Result.Complete)
+end)
+
 T.Finish("Search")

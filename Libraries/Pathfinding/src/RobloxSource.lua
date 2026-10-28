@@ -30,6 +30,12 @@ function RobloxSource.new(Options)
 	if Options.CollisionGroup then Overlap.CollisionGroup = Options.CollisionGroup end
 	local Single = RaycastParams.new()
 	Single.FilterType = Enum.RaycastFilterType.Include
+	Single.RespectCanCollide = true
+	local Sweep = RaycastParams.new()
+	Sweep.FilterType = Enum.RaycastFilterType.Exclude
+	Sweep.FilterDescendantsInstances = Options.Ignore or {}
+	Sweep.RespectCanCollide = true
+	if Options.CollisionGroup then Single.CollisionGroup = Options.CollisionGroup; Sweep.CollisionGroup = Options.CollisionGroup end
 	local Wet = RaycastParams.new()
 	Wet.FilterType = Enum.RaycastFilterType.Include
 	Wet.FilterDescendantsInstances = { Workspace.Terrain }
@@ -41,6 +47,7 @@ function RobloxSource.new(Options)
 	local self = setmetatable({
 		Overlap = Overlap,
 		Single = Single,
+		Sweep = Sweep,
 		Wet = Wet,
 		Dry = Dry,
 		Classify = Options.Classify,
@@ -58,6 +65,54 @@ end
 
 function RobloxSource:SetIgnore(List)
 	self.Overlap.FilterDescendantsInstances = List
+	self.Sweep.FilterDescendantsInstances = List
+end
+
+function RobloxSource:ValidatePath(Points, Agent, Actions)
+	if (Agent.Profile.Jump or 0) > Agent.StepHeight then
+		for Index = 2, #Points do
+			local Point = Points[Index]
+			local Probe = Agent.Profile.Jump
+			local FloorHit = Raycast(Workspace, Point + Vector3New(0, Probe, 0), Vector3New(0, -Probe - 0.25, 0), self.Sweep)
+			if FloorHit and FloorHit.Normal.Y > 0.65 and FloorHit.Position.Y > Point.Y + 0.15 and FloorHit.Position.Y - Point.Y <= Probe then
+				Points[Index] = Vector3New(Point.X, FloorHit.Position.Y, Point.Z)
+			end
+			if Actions and Points[Index].Y - Points[Index - 1].Y > Agent.StepHeight then Actions[Index] = "Jump" end
+		end
+	end
+	local Step = math.min(Agent.StepHeight or 0, Agent.Height - 0.2)
+	local Height = Agent.Height - Step - 0.1
+	local Offset = Vector3New(0, Step + Height * 0.5 + 0.05, 0)
+	local Size = Vector3New(Agent.Radius * 2, Height, Agent.Radius * 2)
+	for Index = 2, #Points do
+		local Start = Points[Index - 1] + Offset
+		local Delta = Points[Index] - Points[Index - 1]
+		if Delta.Magnitude > 0.01 then
+			local Segments = Actions and Actions[Index] == "Jump" and 6 or 1
+			local Arc = Segments > 1 and math.max(0, (Agent.Profile.Jump or Agent.StepHeight) - math.max(Delta.Y, 0) * 0.5) or 0
+			local Previous = Start
+			for Segment = 1, Segments do
+				local Ratio = Segment / Segments
+				local Next = Start + Delta * Ratio + Vector3New(0, Arc * 4 * Ratio * (1 - Ratio), 0)
+				local Hit = Workspace:Blockcast(CFrameNew(Previous), Size, Next - Previous, self.Sweep)
+				if Hit then
+					if Actions and Actions[Index] ~= "Jump" and (Agent.Profile.Jump or 0) > Agent.StepHeight then
+						local Part = Hit.Instance
+						local Frame, PartSize = Part.CFrame, Part.Size
+						local Extent = (math.abs(Frame.XVector.Y) * PartSize.X + math.abs(Frame.YVector.Y) * PartSize.Y + math.abs(Frame.ZVector.Y) * PartSize.Z) * 0.5
+						local Rise = Part.Position.Y + Extent - Points[Index - 1].Y
+						if Rise > 0 and Rise <= Agent.Profile.Jump - 0.5 then
+							Actions[Index] = "Jump"
+							return self:ValidatePath(Points, Agent, Actions)
+						end
+					end
+					return false, Hit.Position, Hit.Instance
+				end
+				Previous = Next
+			end
+		end
+	end
+	return true
 end
 
 function RobloxSource:Entry(Part)

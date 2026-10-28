@@ -201,7 +201,12 @@ function GridSearch.Context(Map, Agent, Options, Yield)
 				if IsBlocked(Cx, Cz) then return false end
 			end
 		end
-		return Key == KeyB and Span == SpanB
+		if Key ~= KeyB or Span ~= SpanB then return false end
+		if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
+			local Path = { MakeVector((Ax + 0.5) * Cell, Ya, (Az + 0.5) * Cell), MakeVector((Bx + 0.5) * Cell, Yb, (Bz + 0.5) * Cell) }
+			return Map.Source:ValidatePath(Path, Agent, { "Walk", Yb - Ya > Agent.StepHeight and "Jump" or "Walk" })
+		end
+		return true
 	end
 
 	Context.Load = Load
@@ -228,6 +233,9 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local ClimbWeight = Options.ClimbWeight or 0.5
 	local Tolerance = Options.Tolerance or Radius + 2
 	local VerticalTolerance = Options.VerticalTolerance or 5
+	local GoalRadius = Options.GoalRadius or 0
+	local GoalHeightOffset = Options.GoalHeightOffset or 0
+	local GoalTest = Options.GoalTest
 
 	local SKey, SSpan = Nearest(From.X, From.Y, From.Z, Options.Below, Options.Above)
 	if not SKey then
@@ -237,7 +245,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local GoalX, GoalY, GoalZ = To.X, To.Y, To.Z
 	local TargetX, TargetZ = GoalX, GoalZ
 	local GoalNode, Relocated
-	do
+	if not GoalTest then
 		local GKey, GSpan = Map:Locate(GoalX, GoalY, GoalZ, Agent.Profile, Yield, Options.Below, Options.Above)
 		if GKey and Context.Usable(GKey, GSpan, Radius) then
 			GoalNode = GKey * Shift + GSpan
@@ -270,6 +278,8 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local G, Parent, Closed = {}, {}, {}
 
 	local CurrentNode, CurrentBase, CurrentCost, CurrentY = 0, 0, 0, 0
+	local CurrentX, CurrentZ
+	local LinkCache = {}
 	local BMinX, BMaxX, BMinZ, BMaxZ = -Huge, Huge, -Huge, Huge
 	local Clipped = false
 
@@ -295,7 +305,20 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		end
 		if Blocked and Blocked[(Cx + 1048576) * 2097152 + Cz + 1048576] then return end
 		local NY = NTile.Floor[NSpan]
+		if (GoalRadius > 0 or Options.ValidateLinks) and Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
+			local X, Z = (Cx + 0.5) * Cell, (Cz + 0.5) * Cell
+			if Options.ValidateLinks or (X - GoalX) ^ 2 + (Z - GoalZ) ^ 2 < (GoalRadius + 12) ^ 2 then
+				local Key = tostring(CurrentNode) .. ":" .. tostring(NNode)
+				local Valid = LinkCache[Key]
+				if Valid == nil then
+					Valid = Map.Source:ValidatePath({ MakeVector(CurrentX, CurrentY, CurrentZ), MakeVector(X, NY, Z) }, Agent, { "Walk", NY - CurrentY > Agent.StepHeight and "Jump" or "Walk" })
+					LinkCache[Key] = Valid == true
+				end
+				if not Valid then return end
+			end
+		end
 		local Cost = CurrentBase + Unit * Cell * (CurrentCost + NCost) * 0.5 + Abs(NY - CurrentY) * ClimbWeight
+		if NY - CurrentY > Agent.StepHeight + 0.01 then Cost += Options.JumpCost or 0 end
 		if Clear < Radius + Comfort then Cost += (Radius + Comfort - Clear) * ProximityWeight * Unit end
 		local Old = G[NNode]
 		if Old and Old <= Cost then return end
@@ -381,11 +404,16 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 				local Dx, Dz = X - GoalX, Z - GoalZ
 				local Planar = Sqrt(Dx * Dx + Dz * Dz)
 				if Planar < BestDistance then BestNode, BestDistance = Node, Planar end
-				if Node == GoalNode or (not GoalNode and Planar <= Tolerance and Abs(Y - GoalY) <= VerticalTolerance) then
+				local HeightGap = Y + GoalHeightOffset - GoalY
+				local InRange = GoalRadius > 0 and Planar * Planar + HeightGap * HeightGap <= GoalRadius * GoalRadius
+				local Accepted = GoalTest and GoalTest(MakeVector(X, Y, Z), G[Node])
+				if Accepted or (not GoalTest and (InRange or Node == GoalNode or (not GoalNode and Planar <= Tolerance and Abs(Y - GoalY) <= VerticalTolerance))) then
 					Found = Node
+					if GoalTest then GoalX, GoalY, GoalZ = X, Y, Z end
 					return "Found"
 				end
 				CurrentNode, CurrentBase, CurrentCost, CurrentY = Node, G[Node], Costs[Tile.Surface[Span]], Y
+				CurrentX, CurrentZ = X, Z
 				local EK, ES = Step(Key, Tile, Data, Span, 1)
 				local WK, WS = Step(Key, Tile, Data, Span, 2)
 				local SK, SS = Step(Key, Tile, Data, Span, 3)
@@ -432,7 +460,9 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		local GoalKey = GoalNode // Shift
 		local StartCost = Costs[(Entries[SKey] or Load(SKey))[1].Surface[SSpan]]
 		local GoalCost = Costs[(Entries[GoalKey] or Load(GoalKey))[1].Surface[GoalNode - GoalKey * Shift]]
-		if Visible(Start, GoalNode, Max(StartCost, GoalCost) * (Options.SmoothCostSlack or 1.3) + 1e-6, Options.SmoothMargin or Cell * 0.5, Options.VerticalSlack or 1) then
+		local StartFloor = Entries[SKey][1].Floor[SSpan]
+		local GoalFloor = Entries[GoalKey][1].Floor[GoalNode - GoalKey * Shift]
+		if Abs(GoalFloor - StartFloor) <= Agent.StepHeight and Visible(Start, GoalNode, Max(StartCost, GoalCost) * (Options.SmoothCostSlack or 1.3) + 1e-6, Options.SmoothMargin or Cell * 0.5, Options.VerticalSlack or 1) then
 			Found = GoalNode
 			Parent[GoalNode] = Start
 			Direct = true
@@ -490,10 +520,12 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	end
 
 	local NodeCost = table.create(Count)
+	local NodeHeight = table.create(Count)
 	for Index = 1, Count do
 		local K = Chain[Index] // Shift
 		local Entry = Entries[K] or Load(K)
 		NodeCost[Index] = Costs[Entry[1].Surface[Chain[Index] - K * Shift]]
+		NodeHeight[Index] = Entry[1].Floor[Chain[Index] - K * Shift]
 	end
 
 	local Kept = { 1 }
@@ -508,6 +540,13 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 			end
 			return Value * CostSlack + 1e-6
 		end
+		local function CanSmooth(A, B)
+			if B == A + 1 then return true end
+			for Index = A + 1, B do
+				if Abs(NodeHeight[Index] - NodeHeight[Index - 1]) > Agent.StepHeight + 0.01 then return false end
+			end
+			return true
+		end
 		local Anchor = 1
 		while Anchor < Count do
 			local Good, Bad = Anchor + 1, nil
@@ -515,7 +554,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 			while true do
 				local Probe = Min(Anchor + Stride, Count)
 				if Probe <= Good then break end
-				if Visible(Chain[Anchor], Chain[Probe], Limit(Anchor, Probe), SmoothMargin, Slack) then
+				if CanSmooth(Anchor, Probe) and Visible(Chain[Anchor], Chain[Probe], Limit(Anchor, Probe), SmoothMargin, Slack) then
 					Good = Probe
 					if Probe == Count then break end
 					Stride *= 2
@@ -527,7 +566,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 			if Bad then
 				while Bad - Good > 1 do
 					local Middle = (Good + Bad) // 2
-					if Visible(Chain[Anchor], Chain[Middle], Limit(Anchor, Middle), SmoothMargin, Slack) then
+					if CanSmooth(Anchor, Middle) and Visible(Chain[Anchor], Chain[Middle], Limit(Anchor, Middle), SmoothMargin, Slack) then
 						Good = Middle
 					else
 						Bad = Middle
@@ -543,6 +582,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	end
 
 	local Points = table.create(#Kept)
+	local Actions = table.create(#Kept, "Walk")
 	local Length = 0
 	local LastX, LastY, LastZ
 	for Index = 1, #Kept do
@@ -561,6 +601,11 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		end
 		LastX, LastY, LastZ = X, Y, Z
 		Points[Index] = MakeVector(X, Y, Z)
+		if Index > 1 then
+			for Raw = Kept[Index - 1] + 1, Kept[Index] do
+				if NodeHeight[Raw] - NodeHeight[Raw - 1] > Agent.StepHeight + 0.01 then Actions[Index] = "Jump"; break end
+			end
+		end
 	end
 
 	local Status = "Complete"
@@ -573,6 +618,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		Status = Status,
 		Complete = Found ~= nil,
 		Points = Points,
+		Actions = Actions,
 		Length = Length,
 		Nodes = Count,
 		Expanded = Expanded,

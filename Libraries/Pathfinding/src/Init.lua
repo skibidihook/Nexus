@@ -9,11 +9,12 @@ local ShapeSource = Require("ShapeSource")
 local IsRoblox = typeof ~= nil and game ~= nil and typeof(game) == "Instance"
 
 local Pathfinding = {
-	Version = "0.1.0",
+	Version = "0.1.1",
 	IsRoblox = IsRoblox,
 	Surface = Surface,
 	Geometry = Geometry,
 	Agent = Agent,
+	Avoidance = Require("Avoidance"),
 	ShapeSource = ShapeSource,
 	FixtureSource = Require("FixtureSource"),
 	Lanes = Require("Lanes"),
@@ -159,16 +160,19 @@ if IsRoblox then
 
 	function Pathfinding.Walk(Map, Who, Options)
 		Options = Options or {}
+		local SearchOptions = table.clone(Options)
+		SearchOptions.Blocked = table.clone(Options.Blocked or {})
 		local Mover = Options.Mover or Movers.Lerp({ Root = Options.Root, Speed = Options.Speed })
 		return Spawn(function(Handle)
 			local Attempts = 0
 			while Handle.Status == "Running" do
 				Attempts += 1
+				Handle.Attempts = Attempts
 				local Root = Resolve(Options.Root)
 				local From = Options.From and Resolve(Options.From) or (Root and Root.Position)
 				if not From then Handle:Finish("Failed", nil, "NoRoot"); return end
 				local Goal = Resolve(Options.Goal)
-				local Request = Pathfinding.FindPath(Map, Who, From, Goal, Options)
+				local Request = Pathfinding.FindPath(Map, Who, From, Goal, SearchOptions)
 				Handle.Inner = Request
 				local Path = Request:Await(Options.PlanTimeout or 15)
 				Handle.Inner = nil
@@ -176,8 +180,31 @@ if IsRoblox then
 				if not Path or #Path.Points == 0 then Handle:Finish("Failed", Path, Path and Path.Status or "PlanFailed"); return end
 				Handle.Path = Path
 				if Options.OnPath then pcall(Options.OnPath, Path) end
+				if not Path.Complete and not Options.AllowPartial then
+					Handle:Finish(Path.Status or "Unreachable", Path, "IncompleteRoute")
+					return
+				end
+				if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
+					local Valid, Position, Blocker = Map.Source:ValidatePath(Path.Points, Who, Path.Actions)
+					if not Valid then
+						Handle.Blocker = Blocker
+						Handle.BlockedPosition = Position
+						if Attempts >= (Options.Attempts or 4) then Handle:Finish("Failed", Path, "BlockedRoute"); return end
+						local Reach = Who.Radius + Map.Cell
+						Map:Invalidate(Position.X - Reach, Position.Z - Reach, Position.X + Reach, Position.Z + Reach)
+						for X = math.floor((Position.X - Reach) / Map.Cell), math.floor((Position.X + Reach) / Map.Cell) do
+							for Z = math.floor((Position.Z - Reach) / Map.Cell), math.floor((Position.Z + Reach) / Map.Cell) do
+								if ((X + 0.5) * Map.Cell - Position.X) ^ 2 + ((Z + 0.5) * Map.Cell - Position.Z) ^ 2 <= Reach ^ 2 then
+									SearchOptions.Blocked[(X + 1048576) * 2097152 + Z + 1048576] = true
+								end
+							end
+						end
+						continue
+					end
+				end
 				local Outcome = Mover(Path.Points, Handle)
 				if Handle.Status ~= "Running" then return end
+				if Outcome == "Threat" then Handle:Finish("Cancelled", Path, "Threat"); return end
 				if Outcome == "Arrived" and Path.Complete then Handle:Finish("Done", Path); return end
 				if Outcome == "Arrived" and Path.Status == "Unreachable" then Handle:Finish("Unreachable", Path); return end
 				if Outcome == "NoRoot" or Attempts >= (Options.Attempts or 4) then
@@ -189,6 +216,11 @@ if IsRoblox then
 					if Here then
 						local P = Here.Position
 						Map:Invalidate(P.X - 24, P.Z - 24, P.X + 24, P.Z + 24)
+						if Handle.StuckTarget then
+							local Target = Handle.StuckTarget
+							local X, Z = math.floor(Target.X / Map.Cell), math.floor(Target.Z / Map.Cell)
+							SearchOptions.Blocked[(X + 1048576) * 2097152 + Z + 1048576] = true
+						end
 					end
 				end
 			end

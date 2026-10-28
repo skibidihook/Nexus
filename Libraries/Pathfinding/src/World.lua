@@ -246,6 +246,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	if Yield then Yield() end
 
 	local Height, Step = Profile.Height, Profile.Step
+	local Jump, Drop = Profile.Jump or Step, Profile.Drop or Step
 	local Walk = table.create(Total, false)
 	for I = 1, Total do Walk[I] = RCeil[I] - RFloor[I] >= Height end
 	local CE, CW, CS, CN = table.create(Total, 0), table.create(Total, 0), table.create(Total, 0), table.create(Total, 0)
@@ -259,7 +260,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 			if not Walk[F] then return 0 end
 			local OtherFloor = RFloor[F]
 			local Gap = OtherFloor - MyFloor
-			if Gap > Step or Gap < -Step then return 0 end
+			if Gap > Jump or Gap < -Drop then return 0 end
 			local OtherCeil = RCeil[F]
 			local Low = MyCeil < OtherCeil and MyCeil or OtherCeil
 			local High = MyFloor > OtherFloor and MyFloor or OtherFloor
@@ -270,7 +271,8 @@ function World:BuildProfile(Tile, Profile, Yield)
 			if Walk[J] then
 				local OtherFloor = RFloor[J]
 				local Gap = Abs(OtherFloor - MyFloor)
-				if Gap <= Step and Gap < BestGap then
+				local Rise = OtherFloor - MyFloor
+				if Rise <= Jump and Rise >= -Drop and Gap < BestGap then
 					local OtherCeil = RCeil[J]
 					local Low = MyCeil < OtherCeil and MyCeil or OtherCeil
 					local High = MyFloor > OtherFloor and MyFloor or OtherFloor
