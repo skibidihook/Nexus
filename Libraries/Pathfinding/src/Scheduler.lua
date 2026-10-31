@@ -68,7 +68,9 @@ function Scheduler:Step(Budget)
 			if Now >= Deadline then break end
 			self.Deadline = Now + (Deadline - Now) / (Count - Offset)
 			local Ok, Err = coroutine.resume(Job.Thread)
-			Job.Cpu += Clock() - Now
+			local Slice = Clock() - Now
+			Job.Cpu += Slice
+			Job.MaxSlice = math.max(Job.MaxSlice or 0, Slice)
 			Job.Slices += 1
 			if not Ok and Job.Status == "Running" then
 				Job.Error = Err

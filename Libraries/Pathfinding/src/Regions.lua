@@ -6,7 +6,7 @@ local Sqrt, Huge = math.sqrt, math.huge
 local Shift = 65536
 local Slots = 4096
 
-function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey)
+function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey, Yield)
 	local Cache = Data.Regions
 	if not Cache then
 		Cache = {}
@@ -25,6 +25,7 @@ function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey)
 	local Key = Tile.Key
 	local BaseX, BaseZ = Tile.Tx * Size, Tile.Tz * Size
 	for Seed = 1, Total do
+		if Yield and Seed % 32 == 0 then Yield() end
 		if Region[Seed] == 0 and Clear[Seed] >= Radius and Costs[Surface[Seed]] < Huge then
 			Count += 1
 			local Id = Count
@@ -34,6 +35,7 @@ function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey)
 			local Top = 1
 			Stack[1] = Seed
 			while Top > 0 do
+				if Yield and Members % 32 == 0 then Yield() end
 				local Span = Stack[Top]
 				Top -= 1
 				local Column = ColumnOf[Span] - 1
@@ -96,7 +98,7 @@ function Regions.Flood(Context, FromKey, FromSpan, ToKey, ToSpan, Limit)
 		local Value = Labelled[Key]
 		if not Value then
 			local Entry = Load(Key)
-			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey)
+			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey, Context.Yield)
 			Labelled[Key] = Value
 		end
 		return Value
@@ -110,12 +112,14 @@ function Regions.Flood(Context, FromKey, FromSpan, ToKey, ToSpan, Limit)
 	local Queue, Seen = { First }, { [First] = true }
 	local Head = 1
 	while Head <= #Queue do
+		if Context.Yield then Context.Yield() end
 		if Head > Limit then return "Limit" end
 		local Node = Queue[Head]
 		Head += 1
 		local Key = Node // Slots
 		local Edges = Labels(Key).Border[Node - Key * Slots]
 		for Index = 1, #Edges, 2 do
+			if Context.Yield and Index % 32 == 1 then Context.Yield() end
 			local OtherKey = Edges[Index]
 			local OtherRegion = Labels(OtherKey).Region[Edges[Index + 1]]
 			if OtherRegion ~= 0 then
@@ -141,7 +145,7 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 		local Value = Labelled[Key]
 		if not Value then
 			local Entry = Load(Key)
-			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey)
+			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey, Context.Yield)
 			Labelled[Key] = Value
 		end
 		return Value
@@ -185,6 +189,7 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 			local Open = State.Open
 			local Node
 			while Open.Size() > 0 do
+				if Yield then Yield() end
 				local Candidate = Open.Pop()
 				if not State.Closed[Candidate] then
 					Node = Candidate
@@ -213,6 +218,7 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 			local X, Y, Z = L.X[Id], L.Y[Id], L.Z[Id]
 			local Seen = {}
 			for Index = 1, #Edges, 2 do
+				if Yield and Index % 32 == 1 then Yield() end
 				local OtherKey, OtherSpan = Edges[Index], Edges[Index + 1]
 				local OtherRegion = Labels(OtherKey).Region[OtherSpan]
 				if OtherRegion ~= 0 then
@@ -245,18 +251,21 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 	local Chain = {}
 	local Node = Meet
 	while Node do
+		if Yield then Yield() end
 		table.insert(Chain, 1, Node)
 		Node = Sides[1].Parent[Node]
 	end
 	Node = Sides[2].Parent[Meet]
 	while Node do
 		Chain[#Chain + 1] = Node
+		if Yield then Yield() end
 		Node = Sides[2].Parent[Node]
 	end
 
 	local Corridor = {}
 	local Pad = Options.CorridorPad or 1
 	for Index = 1, #Chain do
+		if Yield then Yield() end
 		local Key = Chain[Index] // Slots
 		local A = Key // Shift
 		local B = Key - A * Shift

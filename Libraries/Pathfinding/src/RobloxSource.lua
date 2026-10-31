@@ -68,9 +68,10 @@ function RobloxSource:SetIgnore(List)
 	self.Sweep.FilterDescendantsInstances = List
 end
 
-function RobloxSource:ValidatePath(Points, Agent, Actions)
+function RobloxSource:ValidatePath(Points, Agent, Actions, Yield)
 	if (Agent.Profile.Jump or 0) > Agent.StepHeight then
 		for Index = 2, #Points do
+			if Yield and Yield() == false then return false, Points[Index], nil end
 			local Point = Points[Index]
 			local Probe = Agent.Profile.Jump
 			local FloorHit = Raycast(Workspace, Point + Vector3New(0, Probe, 0), Vector3New(0, -Probe - 0.25, 0), self.Sweep)
@@ -85,13 +86,16 @@ function RobloxSource:ValidatePath(Points, Agent, Actions)
 	local Offset = Vector3New(0, Step + Height * 0.5 + 0.05, 0)
 	local Size = Vector3New(Agent.Radius * 2, Height, Agent.Radius * 2)
 	for Index = 2, #Points do
+		if Yield and Yield() == false then return false, Points[Index], nil end
 		local Start = Points[Index - 1] + Offset
 		local Delta = Points[Index] - Points[Index - 1]
 		if Delta.Magnitude > 0.01 then
-			local Segments = Actions and Actions[Index] == "Jump" and 6 or 1
-			local Arc = Segments > 1 and math.max(0, (Agent.Profile.Jump or Agent.StepHeight) - math.max(Delta.Y, 0) * 0.5) or 0
+			local Jumping = Actions and Actions[Index] == "Jump"
+			local Segments = math.max(Jumping and 6 or 1, math.ceil(Delta.Magnitude / 8))
+			local Arc = Jumping and math.max(0, (Agent.Profile.Jump or Agent.StepHeight) - math.max(Delta.Y, 0) * 0.5) or 0
 			local Previous = Start
 			for Segment = 1, Segments do
+				if Yield and Yield() == false then return false, Points[Index], nil end
 				local Ratio = Segment / Segments
 				local Next = Start + Delta * Ratio + Vector3New(0, Arc * 4 * Ratio * (1 - Ratio), 0)
 				local Hit = Workspace:Blockcast(CFrameNew(Previous), Size, Next - Previous, self.Sweep)
@@ -103,7 +107,7 @@ function RobloxSource:ValidatePath(Points, Agent, Actions)
 						local Rise = Part.Position.Y + Extent - Points[Index - 1].Y
 						if Rise > 0 and Rise <= Agent.Profile.Jump - 0.5 then
 							Actions[Index] = "Jump"
-							return self:ValidatePath(Points, Agent, Actions)
+							return self:ValidatePath(Points, Agent, Actions, Yield)
 						end
 					end
 					return false, Hit.Position, Hit.Instance
@@ -156,6 +160,7 @@ end
 
 function RobloxSource:SampleMesh(S, Px, Pz, Index, Emit, Thin)
 	local Params = self.Single
+	Params.FilterDescendantsInstances = S.Filter
 	local Top, Bottom = S.MaxY + 0.25, S.MinY - 0.25
 	local Hit = Raycast(Workspace, Vector3New(Px, Top, Pz), Vector3New(0, Bottom - Top, 0), Params)
 	if not Hit then
@@ -165,7 +170,7 @@ function RobloxSource:SampleMesh(S, Px, Pz, Index, Emit, Thin)
 	local High = Hit.Position.Y
 	local Up = Raycast(Workspace, Vector3New(Px, Bottom, Pz), Vector3New(0, Top - Bottom, 0), Params)
 	local Low = Up and Up.Position.Y or S.MinY
-	if self.Convex or Low >= High then
+	if S.Convex or Low >= High then
 		Emit(Index, Low < High and Low or S.MinY, High, S.Surface)
 		return
 	end
@@ -205,7 +210,6 @@ function RobloxSource:Sample(Info, Emit, Yield)
 	local Width = Cell * Size
 	local Center = CFrameNew(Info.X0 + Width * 0.5, (Info.MinY + Info.MaxY) * 0.5, Info.Z0 + Width * 0.5)
 	local Parts = BoundsInBox(Workspace, Center, Vector3New(Width, Info.MaxY - Info.MinY, Width), self.Overlap)
-	local Single = self.Single
 	for Index = 1, #Parts do
 		local Part = Parts[Index]
 		local Entry = self:Entry(Part)
@@ -214,14 +218,13 @@ function RobloxSource:Sample(Info, Emit, Yield)
 			local PartSize = Part.Size
 			local Shape = Geometry.Shape(Entry.Kind, X, Y, Z, R00, R01, R02, R10, R11, R12, R20, R21, R22, PartSize.X, PartSize.Y, PartSize.Z, Entry.Surface)
 			if Entry.Kind == Geometry.Mesh then
-				Single.FilterDescendantsInstances = { Part }
-				self.Convex = Entry.Convex
-				Raster.Shape(Shape, Info, Emit, self.MeshSampler)
+				Shape.Filter, Shape.Convex = { Part }, Entry.Convex
+				Raster.Shape(Shape, Info, Emit, self.MeshSampler, Yield)
 			else
-				Raster.Shape(Shape, Info, Emit)
+				Raster.Shape(Shape, Info, Emit, nil, Yield)
 			end
 		end
-		if Yield and Index % 24 == 0 then Yield() end
+		if Yield then Yield() end
 	end
 	if self.Terrain then self:SampleTerrain(Info, Emit, Yield) end
 end
@@ -248,6 +251,7 @@ function RobloxSource:SampleTerrain(Info, Emit, Yield)
 		local Pz = Z0 + (Row + 0.5) * Cell
 		local Base = Row * Size + 1
 		for Column = 0, Size - 1 do
+			if Yield and Column % 4 == 0 then Yield() end
 			local Px = X0 + (Column + 0.5) * Cell
 			local Hit = Raycast(Workspace, Vector3New(Px, Top, Pz), Down, Wet)
 			if Hit then

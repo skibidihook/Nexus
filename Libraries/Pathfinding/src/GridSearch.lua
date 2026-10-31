@@ -170,6 +170,7 @@ function GridSearch.Context(Map, Agent, Options, Yield)
 		local Ix, Iz = 0, 0
 		local Key, Span, Entry = KeyA, SpanA, EntryA
 		while Ix < Nx or Iz < Nz do
+			if Yield and (Ix + Iz) % 16 == 0 then Yield() end
 			local Lhs, Rhs = (1 + 2 * Ix) * Nz, (1 + 2 * Iz) * Nx
 			if Lhs < Rhs then
 				Key, Span = Step(Key, Entry[1], Entry[2], Span, DirX)
@@ -204,7 +205,7 @@ function GridSearch.Context(Map, Agent, Options, Yield)
 		if Key ~= KeyB or Span ~= SpanB then return false end
 		if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
 			local Path = { MakeVector((Ax + 0.5) * Cell, Ya, (Az + 0.5) * Cell), MakeVector((Bx + 0.5) * Cell, Yb, (Bz + 0.5) * Cell) }
-			return Map.Source:ValidatePath(Path, Agent, { "Walk", Yb - Ya > Agent.StepHeight and "Jump" or "Walk" })
+			return Map.Source:ValidatePath(Path, Agent, { "Walk", Yb - Ya > Agent.StepHeight and "Jump" or "Walk" }, Yield)
 		end
 		return true
 	end
@@ -311,7 +312,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 				local Key = tostring(CurrentNode) .. ":" .. tostring(NNode)
 				local Valid = LinkCache[Key]
 				if Valid == nil then
-					Valid = Map.Source:ValidatePath({ MakeVector(CurrentX, CurrentY, CurrentZ), MakeVector(X, NY, Z) }, Agent, { "Walk", NY - CurrentY > Agent.StepHeight and "Jump" or "Walk" })
+					Valid = Map.Source:ValidatePath({ MakeVector(CurrentX, CurrentY, CurrentZ), MakeVector(X, NY, Z) }, Agent, { "Walk", NY - CurrentY > Agent.StepHeight and "Jump" or "Walk" }, Yield)
 					LinkCache[Key] = Valid == true
 				end
 				if not Valid then return end
@@ -363,7 +364,10 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 
 	local function Run(Budget)
 		local Used = 0
+		local Popped = 0
 		while true do
+			Popped += 1
+			if Popped % 32 == 0 and Yield and Yield() == false then Stopped = "Timeout"; return "Stopped" end
 			if OpenSize() == 0 then
 				if Corridor and not Unreachable and Clipped then
 					Corridor = nil
@@ -511,6 +515,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local Chain = {}
 	local Node = Target
 	while Node do
+		if Yield and #Chain % 32 == 0 then Yield() end
 		Chain[#Chain + 1] = Node
 		Node = Parent[Node]
 	end
@@ -522,6 +527,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local NodeCost = table.create(Count)
 	local NodeHeight = table.create(Count)
 	for Index = 1, Count do
+		if Yield and Index % 32 == 0 then Yield() end
 		local K = Chain[Index] // Shift
 		local Entry = Entries[K] or Load(K)
 		NodeCost[Index] = Costs[Entry[1].Surface[Chain[Index] - K * Shift]]
@@ -536,6 +542,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		local function Limit(A, B)
 			local Value = 0
 			for Index = A, B do
+				if Yield and Index % 64 == 0 then Yield() end
 				if NodeCost[Index] > Value then Value = NodeCost[Index] end
 			end
 			return Value * CostSlack + 1e-6
@@ -543,6 +550,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		local function CanSmooth(A, B)
 			if B == A + 1 then return true end
 			for Index = A + 1, B do
+				if Yield and Index % 64 == 0 then Yield() end
 				if Abs(NodeHeight[Index] - NodeHeight[Index - 1]) > Agent.StepHeight + 0.01 then return false end
 			end
 			return true
@@ -586,6 +594,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local Length = 0
 	local LastX, LastY, LastZ
 	for Index = 1, #Kept do
+		if Yield and Index % 32 == 0 then Yield() end
 		local Chosen = Chain[Kept[Index]]
 		local K = Chosen // Shift
 		local Entry = Entries[K] or Load(K)

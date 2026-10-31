@@ -20,9 +20,12 @@ function ShapeSource:Box(X, Y, Z, Sx, Sy, Sz, Code, Yaw, Kind)
 	return self:Add(Geometry.Shape(Kind or Geometry.Block, X, Y, Z, R00, R01, R02, R10, R11, R12, R20, R21, R22, Sx, Sy, Sz, Code or 1))
 end
 
-function ShapeSource:Sample(Info, Emit)
+function ShapeSource:Sample(Info, Emit, Yield)
 	local Shapes = self.Shapes
-	for Index = 1, #Shapes do Raster.Shape(Shapes[Index], Info, Emit) end
+	for Index = 1, #Shapes do
+		Raster.Shape(Shapes[Index], Info, Emit, nil, Yield)
+		if Yield then Yield() end
+	end
 end
 
 return ShapeSource

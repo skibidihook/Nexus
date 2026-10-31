@@ -2198,6 +2198,7 @@ function GridSearch.Context(Map, Agent, Options, Yield)
 		local Ix, Iz = 0, 0
 		local Key, Span, Entry = KeyA, SpanA, EntryA
 		while Ix < Nx or Iz < Nz do
+			if Yield and (Ix + Iz) % 16 == 0 then Yield() end
 			local Lhs, Rhs = (1 + 2 * Ix) * Nz, (1 + 2 * Iz) * Nx
 			if Lhs < Rhs then
 				Key, Span = Step(Key, Entry[1], Entry[2], Span, DirX)
@@ -2232,7 +2233,7 @@ function GridSearch.Context(Map, Agent, Options, Yield)
 		if Key ~= KeyB or Span ~= SpanB then return false end
 		if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
 			local Path = { MakeVector((Ax + 0.5) * Cell, Ya, (Az + 0.5) * Cell), MakeVector((Bx + 0.5) * Cell, Yb, (Bz + 0.5) * Cell) }
-			return Map.Source:ValidatePath(Path, Agent, { "Walk", Yb - Ya > Agent.StepHeight and "Jump" or "Walk" })
+			return Map.Source:ValidatePath(Path, Agent, { "Walk", Yb - Ya > Agent.StepHeight and "Jump" or "Walk" }, Yield)
 		end
 		return true
 	end
@@ -2339,7 +2340,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 				local Key = tostring(CurrentNode) .. ":" .. tostring(NNode)
 				local Valid = LinkCache[Key]
 				if Valid == nil then
-					Valid = Map.Source:ValidatePath({ MakeVector(CurrentX, CurrentY, CurrentZ), MakeVector(X, NY, Z) }, Agent, { "Walk", NY - CurrentY > Agent.StepHeight and "Jump" or "Walk" })
+					Valid = Map.Source:ValidatePath({ MakeVector(CurrentX, CurrentY, CurrentZ), MakeVector(X, NY, Z) }, Agent, { "Walk", NY - CurrentY > Agent.StepHeight and "Jump" or "Walk" }, Yield)
 					LinkCache[Key] = Valid == true
 				end
 				if not Valid then return end
@@ -2391,7 +2392,10 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 
 	local function Run(Budget)
 		local Used = 0
+		local Popped = 0
 		while true do
+			Popped += 1
+			if Popped % 32 == 0 and Yield and Yield() == false then Stopped = "Timeout"; return "Stopped" end
 			if OpenSize() == 0 then
 				if Corridor and not Unreachable and Clipped then
 					Corridor = nil
@@ -2539,6 +2543,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local Chain = {}
 	local Node = Target
 	while Node do
+		if Yield and #Chain % 32 == 0 then Yield() end
 		Chain[#Chain + 1] = Node
 		Node = Parent[Node]
 	end
@@ -2550,6 +2555,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local NodeCost = table.create(Count)
 	local NodeHeight = table.create(Count)
 	for Index = 1, Count do
+		if Yield and Index % 32 == 0 then Yield() end
 		local K = Chain[Index] // Shift
 		local Entry = Entries[K] or Load(K)
 		NodeCost[Index] = Costs[Entry[1].Surface[Chain[Index] - K * Shift]]
@@ -2564,6 +2570,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		local function Limit(A, B)
 			local Value = 0
 			for Index = A, B do
+				if Yield and Index % 64 == 0 then Yield() end
 				if NodeCost[Index] > Value then Value = NodeCost[Index] end
 			end
 			return Value * CostSlack + 1e-6
@@ -2571,6 +2578,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 		local function CanSmooth(A, B)
 			if B == A + 1 then return true end
 			for Index = A + 1, B do
+				if Yield and Index % 64 == 0 then Yield() end
 				if Abs(NodeHeight[Index] - NodeHeight[Index - 1]) > Agent.StepHeight + 0.01 then return false end
 			end
 			return true
@@ -2614,6 +2622,7 @@ function GridSearch.Find(Map, Agent, From, To, Options, Yield)
 	local Length = 0
 	local LastX, LastY, LastZ
 	for Index = 1, #Kept do
+		if Yield and Index % 32 == 0 then Yield() end
 		local Chosen = Chain[Kept[Index]]
 		local K = Chosen // Shift
 		local Entry = Entries[K] or Load(K)
@@ -2978,7 +2987,15 @@ if IsRoblox then
 					return
 				end
 				if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
-					local Valid, Position, Blocker = Map.Source:ValidatePath(Path.Points, Who, Path.Actions)
+					local Validation = Scheduler:Spawn(function(Job)
+						return table.pack(Map.Source:ValidatePath(Path.Points, Who, Path.Actions, Job.Yield))
+					end, Options.PlanTimeout or 15)
+					Handle.Inner = Validation
+					local Checked, ValidationStatus, ValidationError = Validation:Await(Options.PlanTimeout or 15)
+					Handle.Inner = nil
+					if Handle.Status ~= "Running" then return end
+					if not Checked then Handle:Finish("Failed", Path, ValidationError or ValidationStatus); return end
+					local Valid, Position, Blocker = table.unpack(Checked, 1, Checked.n)
 					if not Valid then
 						Handle.Blocker = Blocker
 						Handle.BlockedPosition = Position
@@ -3875,7 +3892,7 @@ local function Sampled(S, Cx, Cz, Inset)
 	return Bottom, Top
 end
 
-function Raster.Shape(S, Info, Emit, Sampler)
+function Raster.Shape(S, Info, Emit, Sampler, Yield)
 	local Cell, Size, X0, Z0 = Info.Cell, Info.Size, Info.X0, Info.Z0
 	if S.MaxX <= X0 or S.MinX >= X0 + Size * Cell or S.MaxZ <= Z0 or S.MinZ >= Z0 + Size * Cell then return end
 	if S.MaxY < Info.MinY or S.MinY > Info.MaxY then return end
@@ -3897,6 +3914,7 @@ function Raster.Shape(S, Info, Emit, Sampler)
 			local Base = Row * Size + 1
 			local Cz = ZLow + Half
 			for Column = First, Last do
+				if Yield and Column % 4 == 0 then Yield() end
 				if Constant then
 					Emit(Base + Column, MinY, MaxY, Code)
 				elseif Sampler then
@@ -4502,7 +4520,7 @@ local Sqrt, Huge = math.sqrt, math.huge
 local Shift = 65536
 local Slots = 4096
 
-function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey)
+function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey, Yield)
 	local Cache = Data.Regions
 	if not Cache then
 		Cache = {}
@@ -4521,6 +4539,7 @@ function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey)
 	local Key = Tile.Key
 	local BaseX, BaseZ = Tile.Tx * Size, Tile.Tz * Size
 	for Seed = 1, Total do
+		if Yield and Seed % 32 == 0 then Yield() end
 		if Region[Seed] == 0 and Clear[Seed] >= Radius and Costs[Surface[Seed]] < Huge then
 			Count += 1
 			local Id = Count
@@ -4530,6 +4549,7 @@ function Regions.Label(Map, Tile, Data, Radius, Costs, MaskKey)
 			local Top = 1
 			Stack[1] = Seed
 			while Top > 0 do
+				if Yield and Members % 32 == 0 then Yield() end
 				local Span = Stack[Top]
 				Top -= 1
 				local Column = ColumnOf[Span] - 1
@@ -4592,7 +4612,7 @@ function Regions.Flood(Context, FromKey, FromSpan, ToKey, ToSpan, Limit)
 		local Value = Labelled[Key]
 		if not Value then
 			local Entry = Load(Key)
-			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey)
+			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey, Context.Yield)
 			Labelled[Key] = Value
 		end
 		return Value
@@ -4606,12 +4626,14 @@ function Regions.Flood(Context, FromKey, FromSpan, ToKey, ToSpan, Limit)
 	local Queue, Seen = { First }, { [First] = true }
 	local Head = 1
 	while Head <= #Queue do
+		if Context.Yield then Context.Yield() end
 		if Head > Limit then return "Limit" end
 		local Node = Queue[Head]
 		Head += 1
 		local Key = Node // Slots
 		local Edges = Labels(Key).Border[Node - Key * Slots]
 		for Index = 1, #Edges, 2 do
+			if Context.Yield and Index % 32 == 1 then Context.Yield() end
 			local OtherKey = Edges[Index]
 			local OtherRegion = Labels(OtherKey).Region[Edges[Index + 1]]
 			if OtherRegion ~= 0 then
@@ -4637,7 +4659,7 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 		local Value = Labelled[Key]
 		if not Value then
 			local Entry = Load(Key)
-			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey)
+			Value = Regions.Label(Map, Entry[1], Entry[2], Radius, Costs, MaskKey, Context.Yield)
 			Labelled[Key] = Value
 		end
 		return Value
@@ -4681,6 +4703,7 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 			local Open = State.Open
 			local Node
 			while Open.Size() > 0 do
+				if Yield then Yield() end
 				local Candidate = Open.Pop()
 				if not State.Closed[Candidate] then
 					Node = Candidate
@@ -4709,6 +4732,7 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 			local X, Y, Z = L.X[Id], L.Y[Id], L.Z[Id]
 			local Seen = {}
 			for Index = 1, #Edges, 2 do
+				if Yield and Index % 32 == 1 then Yield() end
 				local OtherKey, OtherSpan = Edges[Index], Edges[Index + 1]
 				local OtherRegion = Labels(OtherKey).Region[OtherSpan]
 				if OtherRegion ~= 0 then
@@ -4741,18 +4765,21 @@ function Regions.Corridor(Context, StartKey, StartSpan, GoalKey, GoalSpan, Optio
 	local Chain = {}
 	local Node = Meet
 	while Node do
+		if Yield then Yield() end
 		table.insert(Chain, 1, Node)
 		Node = Sides[1].Parent[Node]
 	end
 	Node = Sides[2].Parent[Meet]
 	while Node do
 		Chain[#Chain + 1] = Node
+		if Yield then Yield() end
 		Node = Sides[2].Parent[Node]
 	end
 
 	local Corridor = {}
 	local Pad = Options.CorridorPad or 1
 	for Index = 1, #Chain do
+		if Yield then Yield() end
 		local Key = Chain[Index] // Slots
 		local A = Key // Shift
 		local B = Key - A * Shift
@@ -4838,9 +4865,10 @@ function RobloxSource:SetIgnore(List)
 	self.Sweep.FilterDescendantsInstances = List
 end
 
-function RobloxSource:ValidatePath(Points, Agent, Actions)
+function RobloxSource:ValidatePath(Points, Agent, Actions, Yield)
 	if (Agent.Profile.Jump or 0) > Agent.StepHeight then
 		for Index = 2, #Points do
+			if Yield and Yield() == false then return false, Points[Index], nil end
 			local Point = Points[Index]
 			local Probe = Agent.Profile.Jump
 			local FloorHit = Raycast(Workspace, Point + Vector3New(0, Probe, 0), Vector3New(0, -Probe - 0.25, 0), self.Sweep)
@@ -4855,13 +4883,16 @@ function RobloxSource:ValidatePath(Points, Agent, Actions)
 	local Offset = Vector3New(0, Step + Height * 0.5 + 0.05, 0)
 	local Size = Vector3New(Agent.Radius * 2, Height, Agent.Radius * 2)
 	for Index = 2, #Points do
+		if Yield and Yield() == false then return false, Points[Index], nil end
 		local Start = Points[Index - 1] + Offset
 		local Delta = Points[Index] - Points[Index - 1]
 		if Delta.Magnitude > 0.01 then
-			local Segments = Actions and Actions[Index] == "Jump" and 6 or 1
-			local Arc = Segments > 1 and math.max(0, (Agent.Profile.Jump or Agent.StepHeight) - math.max(Delta.Y, 0) * 0.5) or 0
+			local Jumping = Actions and Actions[Index] == "Jump"
+			local Segments = math.max(Jumping and 6 or 1, math.ceil(Delta.Magnitude / 8))
+			local Arc = Jumping and math.max(0, (Agent.Profile.Jump or Agent.StepHeight) - math.max(Delta.Y, 0) * 0.5) or 0
 			local Previous = Start
 			for Segment = 1, Segments do
+				if Yield and Yield() == false then return false, Points[Index], nil end
 				local Ratio = Segment / Segments
 				local Next = Start + Delta * Ratio + Vector3New(0, Arc * 4 * Ratio * (1 - Ratio), 0)
 				local Hit = Workspace:Blockcast(CFrameNew(Previous), Size, Next - Previous, self.Sweep)
@@ -4873,7 +4904,7 @@ function RobloxSource:ValidatePath(Points, Agent, Actions)
 						local Rise = Part.Position.Y + Extent - Points[Index - 1].Y
 						if Rise > 0 and Rise <= Agent.Profile.Jump - 0.5 then
 							Actions[Index] = "Jump"
-							return self:ValidatePath(Points, Agent, Actions)
+							return self:ValidatePath(Points, Agent, Actions, Yield)
 						end
 					end
 					return false, Hit.Position, Hit.Instance
@@ -4926,6 +4957,7 @@ end
 
 function RobloxSource:SampleMesh(S, Px, Pz, Index, Emit, Thin)
 	local Params = self.Single
+	Params.FilterDescendantsInstances = S.Filter
 	local Top, Bottom = S.MaxY + 0.25, S.MinY - 0.25
 	local Hit = Raycast(Workspace, Vector3New(Px, Top, Pz), Vector3New(0, Bottom - Top, 0), Params)
 	if not Hit then
@@ -4935,7 +4967,7 @@ function RobloxSource:SampleMesh(S, Px, Pz, Index, Emit, Thin)
 	local High = Hit.Position.Y
 	local Up = Raycast(Workspace, Vector3New(Px, Bottom, Pz), Vector3New(0, Top - Bottom, 0), Params)
 	local Low = Up and Up.Position.Y or S.MinY
-	if self.Convex or Low >= High then
+	if S.Convex or Low >= High then
 		Emit(Index, Low < High and Low or S.MinY, High, S.Surface)
 		return
 	end
@@ -4975,7 +5007,6 @@ function RobloxSource:Sample(Info, Emit, Yield)
 	local Width = Cell * Size
 	local Center = CFrameNew(Info.X0 + Width * 0.5, (Info.MinY + Info.MaxY) * 0.5, Info.Z0 + Width * 0.5)
 	local Parts = BoundsInBox(Workspace, Center, Vector3New(Width, Info.MaxY - Info.MinY, Width), self.Overlap)
-	local Single = self.Single
 	for Index = 1, #Parts do
 		local Part = Parts[Index]
 		local Entry = self:Entry(Part)
@@ -4984,14 +5015,13 @@ function RobloxSource:Sample(Info, Emit, Yield)
 			local PartSize = Part.Size
 			local Shape = Geometry.Shape(Entry.Kind, X, Y, Z, R00, R01, R02, R10, R11, R12, R20, R21, R22, PartSize.X, PartSize.Y, PartSize.Z, Entry.Surface)
 			if Entry.Kind == Geometry.Mesh then
-				Single.FilterDescendantsInstances = { Part }
-				self.Convex = Entry.Convex
-				Raster.Shape(Shape, Info, Emit, self.MeshSampler)
+				Shape.Filter, Shape.Convex = { Part }, Entry.Convex
+				Raster.Shape(Shape, Info, Emit, self.MeshSampler, Yield)
 			else
-				Raster.Shape(Shape, Info, Emit)
+				Raster.Shape(Shape, Info, Emit, nil, Yield)
 			end
 		end
-		if Yield and Index % 24 == 0 then Yield() end
+		if Yield then Yield() end
 	end
 	if self.Terrain then self:SampleTerrain(Info, Emit, Yield) end
 end
@@ -5018,6 +5048,7 @@ function RobloxSource:SampleTerrain(Info, Emit, Yield)
 		local Pz = Z0 + (Row + 0.5) * Cell
 		local Base = Row * Size + 1
 		for Column = 0, Size - 1 do
+			if Yield and Column % 4 == 0 then Yield() end
 			local Px = X0 + (Column + 0.5) * Cell
 			local Hit = Raycast(Workspace, Vector3New(Px, Top, Pz), Down, Wet)
 			if Hit then
@@ -5108,7 +5139,9 @@ function Scheduler:Step(Budget)
 			if Now >= Deadline then break end
 			self.Deadline = Now + (Deadline - Now) / (Count - Offset)
 			local Ok, Err = coroutine.resume(Job.Thread)
-			Job.Cpu += Clock() - Now
+			local Slice = Clock() - Now
+			Job.Cpu += Slice
+			Job.MaxSlice = math.max(Job.MaxSlice or 0, Slice)
 			Job.Slices += 1
 			if not Ok and Job.Status == "Running" then
 				Job.Error = Err
@@ -5205,9 +5238,12 @@ function ShapeSource:Box(X, Y, Z, Sx, Sy, Sz, Code, Yaw, Kind)
 	return self:Add(Geometry.Shape(Kind or Geometry.Block, X, Y, Z, R00, R01, R02, R10, R11, R12, R20, R21, R22, Sx, Sy, Sz, Code or 1))
 end
 
-function ShapeSource:Sample(Info, Emit)
+function ShapeSource:Sample(Info, Emit, Yield)
 	local Shapes = self.Shapes
-	for Index = 1, #Shapes do Raster.Shape(Shapes[Index], Info, Emit) end
+	for Index = 1, #Shapes do
+		Raster.Shape(Shapes[Index], Info, Emit, nil, Yield)
+		if Yield then Yield() end
+	end
 end
 
 return ShapeSource
@@ -5220,20 +5256,23 @@ local MergeGap = 0.05
 local MinHeadroom = 0.5
 local MaxSpans = 65535
 
-function Spans.Build(Tile, Intervals, Columns)
+function Spans.Build(Tile, Intervals, Columns, Yield)
 	local Count = table.create(Columns, 0)
 	local First = table.create(Columns, 0)
 	local FloorY, CeilY, SurfaceOf, ColumnOf = {}, {}, {}, {}
 	local B, T, S = {}, {}, {}
 	local Total = 0
 	for Column = 1, Columns do
+		if Yield then Yield() end
 		local List = Intervals[Column]
 		if List then
 			local N = #List // 3
 			for I = 1, N do
+				if Yield and I % 32 == 0 then Yield() end
 				local Bottom, Top, Code = List[I * 3 - 2], List[I * 3 - 1], List[I * 3]
 				local J = I - 1
 				while J >= 1 and B[J] > Bottom do
+					if Yield and J % 32 == 0 then Yield() end
 					B[J + 1], T[J + 1], S[J + 1] = B[J], T[J], S[J]
 					J -= 1
 				end
@@ -5241,6 +5280,7 @@ function Spans.Build(Tile, Intervals, Columns)
 			end
 			local W = 1
 			for I = 2, N do
+				if Yield and I % 32 == 0 then Yield() end
 				if B[I] <= T[W] + MergeGap then
 					if T[I] > T[W] then
 						T[W] = T[I]
@@ -5254,6 +5294,7 @@ function Spans.Build(Tile, Intervals, Columns)
 			local Made = 0
 			First[Column] = Total + 1
 			for I = 1, W do
+				if Yield and I % 32 == 0 then Yield() end
 				local Low = T[I]
 				local High = I < W and B[I + 1] or Huge
 				if High - Low >= MinHeadroom and Total < MaxSpans then
@@ -5497,7 +5538,7 @@ function World:Sample(Tx, Tz, Yield)
 	local Start = self.Clock()
 	if self.Source then self.Source:Sample(Info, Emit, Yield) end
 	if Yield then Yield() end
-	local Tile = Spans.Build({ Key = Key, Tx = Tx, Tz = Tz, X0 = Info.X0, Z0 = Info.Z0, Profiles = {} }, Intervals, Size * Size)
+	local Tile = Spans.Build({ Key = Key, Tx = Tx, Tz = Tz, X0 = Info.X0, Z0 = Info.Z0, Profiles = {} }, Intervals, Size * Size, Yield)
 	local Now = self.Clock()
 	local Stats = self.Stats
 	Stats.Sampled += 1
@@ -5647,6 +5688,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	local RFloor, RCeil, RSpan = {}, {}, {}
 	local Total = 0
 	for Rz = 0, Width - 1 do
+		if Yield then Yield() end
 		local Gz = Rz - Margin
 		local Dz = Gz < 0 and -1 or (Gz >= Size and 1 or 0)
 		local RowBase = (Gz - Dz * Size) * Size + 1
@@ -5729,7 +5771,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 				end
 			end
 		end
-		if Yield and Rz % 8 == 7 then Yield() end
+		if Yield then Yield() end
 	end
 
 	local Dist = table.create(Total, 0)
@@ -5738,6 +5780,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	end
 	for Rz = 0, Width - 1 do
 		local Line = Rz * Width + 1
+		if Yield then Yield() end
 		for Rx = 0, Width - 1 do
 			local RIndex = Line + Rx
 			local N = RCount[RIndex]
@@ -5774,6 +5817,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	end
 	if Yield then Yield() end
 	for Rz = Width - 1, 0, -1 do
+		if Yield then Yield() end
 		local Line = Rz * Width + 1
 		for Rx = Width - 1, 0, -1 do
 			local RIndex = Line + Rx
@@ -5817,6 +5861,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	local Cap = Profile.Cap
 	local TFirst, TCount = Tile.First, Tile.Count
 	for Lz = 0, Size - 1 do
+		if Yield then Yield() end
 		local Line = (Lz + Margin) * Width + Margin + 1
 		local Base = Lz * Size + 1
 		for Lx = 0, Size - 1 do

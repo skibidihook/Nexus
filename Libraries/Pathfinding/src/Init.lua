@@ -185,7 +185,15 @@ if IsRoblox then
 					return
 				end
 				if Map.Source and Map.Source.ValidatePath and Options.Validate ~= false then
-					local Valid, Position, Blocker = Map.Source:ValidatePath(Path.Points, Who, Path.Actions)
+					local Validation = Scheduler:Spawn(function(Job)
+						return table.pack(Map.Source:ValidatePath(Path.Points, Who, Path.Actions, Job.Yield))
+					end, Options.PlanTimeout or 15)
+					Handle.Inner = Validation
+					local Checked, ValidationStatus, ValidationError = Validation:Await(Options.PlanTimeout or 15)
+					Handle.Inner = nil
+					if Handle.Status ~= "Running" then return end
+					if not Checked then Handle:Finish("Failed", Path, ValidationError or ValidationStatus); return end
+					local Valid, Position, Blocker = table.unpack(Checked, 1, Checked.n)
 					if not Valid then
 						Handle.Blocker = Blocker
 						Handle.BlockedPosition = Position

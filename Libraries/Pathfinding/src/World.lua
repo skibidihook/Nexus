@@ -68,7 +68,7 @@ function World:Sample(Tx, Tz, Yield)
 	local Start = self.Clock()
 	if self.Source then self.Source:Sample(Info, Emit, Yield) end
 	if Yield then Yield() end
-	local Tile = Spans.Build({ Key = Key, Tx = Tx, Tz = Tz, X0 = Info.X0, Z0 = Info.Z0, Profiles = {} }, Intervals, Size * Size)
+	local Tile = Spans.Build({ Key = Key, Tx = Tx, Tz = Tz, X0 = Info.X0, Z0 = Info.Z0, Profiles = {} }, Intervals, Size * Size, Yield)
 	local Now = self.Clock()
 	local Stats = self.Stats
 	Stats.Sampled += 1
@@ -218,6 +218,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	local RFloor, RCeil, RSpan = {}, {}, {}
 	local Total = 0
 	for Rz = 0, Width - 1 do
+		if Yield then Yield() end
 		local Gz = Rz - Margin
 		local Dz = Gz < 0 and -1 or (Gz >= Size and 1 or 0)
 		local RowBase = (Gz - Dz * Size) * Size + 1
@@ -300,7 +301,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 				end
 			end
 		end
-		if Yield and Rz % 8 == 7 then Yield() end
+		if Yield then Yield() end
 	end
 
 	local Dist = table.create(Total, 0)
@@ -309,6 +310,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	end
 	for Rz = 0, Width - 1 do
 		local Line = Rz * Width + 1
+		if Yield then Yield() end
 		for Rx = 0, Width - 1 do
 			local RIndex = Line + Rx
 			local N = RCount[RIndex]
@@ -345,6 +347,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	end
 	if Yield then Yield() end
 	for Rz = Width - 1, 0, -1 do
+		if Yield then Yield() end
 		local Line = Rz * Width + 1
 		for Rx = Width - 1, 0, -1 do
 			local RIndex = Line + Rx
@@ -388,6 +391,7 @@ function World:BuildProfile(Tile, Profile, Yield)
 	local Cap = Profile.Cap
 	local TFirst, TCount = Tile.First, Tile.Count
 	for Lz = 0, Size - 1 do
+		if Yield then Yield() end
 		local Line = (Lz + Margin) * Width + Margin + 1
 		local Base = Lz * Size + 1
 		for Lx = 0, Size - 1 do

@@ -33,7 +33,7 @@ local function Sampled(S, Cx, Cz, Inset)
 	return Bottom, Top
 end
 
-function Raster.Shape(S, Info, Emit, Sampler)
+function Raster.Shape(S, Info, Emit, Sampler, Yield)
 	local Cell, Size, X0, Z0 = Info.Cell, Info.Size, Info.X0, Info.Z0
 	if S.MaxX <= X0 or S.MinX >= X0 + Size * Cell or S.MaxZ <= Z0 or S.MinZ >= Z0 + Size * Cell then return end
 	if S.MaxY < Info.MinY or S.MinY > Info.MaxY then return end
@@ -55,6 +55,7 @@ function Raster.Shape(S, Info, Emit, Sampler)
 			local Base = Row * Size + 1
 			local Cz = ZLow + Half
 			for Column = First, Last do
+				if Yield and Column % 4 == 0 then Yield() end
 				if Constant then
 					Emit(Base + Column, MinY, MaxY, Code)
 				elseif Sampler then
